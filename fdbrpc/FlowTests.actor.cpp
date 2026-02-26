@@ -557,7 +557,8 @@ TEST_CASE("/flow/flow/callbacks") {
 
 	onReady(std::move(f), [&result](int x) { result = x; }, [&result](Error e) { result = -1; });
 	onReady(p.getFuture(), [&happened](int) { happened = true; }, [&happened](Error) { happened = true; });
-	ASSERT(!f.isValid());
+	ASSERT(
+	    !f.isValid()); // NOLINT(bugprone-use-after-move): this test intentionally checks the moved-from Future state.
 	ASSERT(p.isValid() && !p.isSet() && p.getFutureReferenceCount() == 1);
 	ASSERT(result == 0 && !happened);
 
@@ -574,7 +575,8 @@ TEST_CASE("/flow/flow/callbacks") {
 	f = p.getFuture();
 	result = 0;
 	onReady(std::move(f), [&result](int x) { result = x; }, [&result](Error e) { result = -e.code(); });
-	ASSERT(!f.isValid());
+	ASSERT(
+	    !f.isValid()); // NOLINT(bugprone-use-after-move): this test intentionally checks the moved-from Future state.
 	ASSERT(p.isValid() && !p.isSet() && p.getFutureReferenceCount() == 1);
 	ASSERT(result == 0);
 
@@ -1487,7 +1489,8 @@ TEST_CASE("/flow/flow/PromiseStream/move2") {
 	stream.send(Tracker{});
 	Tracker tracker = waitNext(stream.getFuture());
 	Tracker movedTracker = std::move(tracker);
-	ASSERT(tracker.moved);
+	ASSERT(
+	    tracker.moved); // NOLINT(bugprone-use-after-move): this test intentionally checks the moved-from Tracker state.
 	ASSERT(!movedTracker.moved);
 	ASSERT(movedTracker.copied == 0);
 	return Void();

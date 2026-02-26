@@ -86,10 +86,11 @@ void UDPMetricClient::send(MetricCollection* metrics) {
 
 		std::vector<OTEL::OTELSum> currentSums;
 		size_t current_msgpack = 0;
-		for (const auto& [_, s] : metrics->sumMap) {
+		for (auto& [_, s] : metrics->sumMap) {
+			const auto msgpackBytes = s.getMsgpackBytes();
 			if (current_msgpack < MAX_OTELSUM_PACKET_SIZE) {
 				currentSums.push_back(std::move(s));
-				current_msgpack += s.getMsgpackBytes();
+				current_msgpack += msgpackBytes;
 			} else {
 				sums.push_back(std::move(currentSums));
 				currentSums.clear();
@@ -109,7 +110,7 @@ void UDPMetricClient::send(MetricCollection* metrics) {
 
 		// Each histogram should be in a separate because of their large sizes
 		// Expected DDSketch size is ~4200 entries * 9 bytes = 37800
-		for (const auto& [_, h] : metrics->histMap) {
+		for (auto& [_, h] : metrics->histMap) {
 			const std::vector<OTEL::OTELHistogram> singleHist{ std::move(h) };
 			serialize_ext(singleHist, buf, OTEL::OTELMetricType::Hist, f_hists);
 			send_packet(socket_fd, buf.buffer.get(), buf.data_size);
@@ -120,7 +121,7 @@ void UDPMetricClient::send(MetricCollection* metrics) {
 
 		metrics->histMap.clear();
 
-		for (const auto& [_, g] : metrics->gaugeMap) {
+		for (auto& [_, g] : metrics->gaugeMap) {
 			gauges.push_back(std::move(g));
 		}
 		if (!gauges.empty()) {

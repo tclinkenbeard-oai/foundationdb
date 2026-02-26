@@ -351,6 +351,7 @@ static std::string formatStringRef(StringRef item, bool fullEscaping = false) {
 	return ret;
 }
 
+// NOLINTBEGIN(bugprone-use-after-move): ignore clang-tidy false positives in parseLine's token buffer handling.
 static std::vector<std::vector<StringRef>> parseLine(std::string& line, bool& err, bool& partial) {
 	err = false;
 	partial = false;
@@ -468,6 +469,7 @@ static std::vector<std::vector<StringRef>> parseLine(std::string& line, bool& er
 
 	return ret;
 }
+// NOLINTEND(bugprone-use-after-move)
 
 static void printProgramUsage(const char* name) {
 	printf("FoundationDB CLI " FDB_VT_PACKAGE_NAME " (v" FDB_VT_VERSION ")\n"

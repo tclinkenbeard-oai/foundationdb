@@ -3198,6 +3198,7 @@ ACTOR Future<Void> modifyBackup(Database db, std::string tagName, BackupModifyOp
 	return Void();
 }
 
+// NOLINTBEGIN(bugprone-use-after-move): ignore clang-tidy false positives in parseLine's token buffer handling.
 static std::vector<std::vector<StringRef>> parseLine(std::string& line, bool& err, bool& partial) {
 	err = false;
 	partial = false;
@@ -3289,6 +3290,7 @@ static std::vector<std::vector<StringRef>> parseLine(std::string& line, bool& er
 
 	return ret;
 }
+// NOLINTEND(bugprone-use-after-move)
 
 static void addKeyRange(std::string optionValue, Standalone<VectorRef<KeyRangeRef>>& keyRanges) {
 	bool err = false, partial = false;

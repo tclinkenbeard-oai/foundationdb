@@ -1,5 +1,6 @@
 ---
 Checks: >
   -*,
-  bugprone-sizeof-expression
+  bugprone-sizeof-expression,
+  bugprone-use-after-move
 ...
