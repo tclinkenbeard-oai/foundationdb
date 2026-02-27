@@ -782,7 +782,7 @@ Future<Void> LogRouterData::cleanupPeekTrackers() {
 		while (it != peekTracker.end()) {
 			double timeUntilExpiration = it->second.lastUpdate + SERVER_KNOBS->PEEK_TRACKER_EXPIRATION_TIME - now();
 			if (timeUntilExpiration < 1.0e-6) {
-				for (auto seq : it->second.sequence_version) {
+				for (const auto& seq : it->second.sequence_version) {
 					if (!seq.second.isSet()) {
 						seq.second.sendError(timed_out());
 					}
@@ -811,7 +811,7 @@ Future<Void> logRouterPop(LogRouterData* self, TLogPopRequest req) {
 
 	Version minPopped = std::numeric_limits<Version>::max();
 	Version minKnownCommittedVersion = std::numeric_limits<Version>::max();
-	for (auto it : self->tag_data) {
+	for (const auto& it : self->tag_data) {
 		if (it) {
 			minPopped = std::min(it->popped, minPopped);
 			minKnownCommittedVersion = std::min(it->durableKnownCommittedVersion, minKnownCommittedVersion);

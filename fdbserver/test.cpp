@@ -2923,7 +2923,7 @@ Future<Void> runTests7(Reference<AsyncVar<Optional<struct ClusterControllerFullI
 			g_simulator->satelliteTLogPolicy = configuration.regions[0].satelliteTLogPolicy;
 			g_simulator->satelliteTLogWriteAntiQuorum = configuration.regions[0].satelliteTLogWriteAntiQuorum;
 
-			for (auto s : configuration.regions[0].satellites) {
+			for (const auto& s : configuration.regions[0].satellites) {
 				g_simulator->primarySatelliteDcIds.push_back(s.dcId);
 			}
 		} else {
@@ -2937,7 +2937,7 @@ Future<Void> runTests7(Reference<AsyncVar<Optional<struct ClusterControllerFullI
 			       configuration.regions[0].satelliteTLogPolicy->info() ==
 			           configuration.regions[1].satelliteTLogPolicy->info());
 
-			for (auto s : configuration.regions[1].satellites) {
+			for (const auto& s : configuration.regions[1].satellites) {
 				g_simulator->remoteSatelliteDcIds.push_back(s.dcId);
 			}
 		}

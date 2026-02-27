@@ -90,7 +90,7 @@ int mostUsedZoneCount(Reference<LocalitySet>& logServerSet, std::vector<Locality
 		entries[value.get()]++;
 	}
 	int maxEntries = 0;
-	for (auto it : entries) {
+	for (const auto& it : entries) {
 		maxEntries = std::max(maxEntries, it.second);
 	}
 	return maxEntries;
@@ -121,7 +121,7 @@ bool findBestPolicySetSimple(int targetUniqueValueCount,
 	ASSERT_WE_THINK(uniqueValueCount == entries.size());
 	std::vector<std::vector<int>> randomizedEntries;
 	randomizedEntries.resize(entries.size());
-	for (auto it : entries) {
+	for (const auto& it : entries) {
 		randomizedEntries.push_back(it.second);
 	}
 	deterministicRandom()->randomShuffle(randomizedEntries);

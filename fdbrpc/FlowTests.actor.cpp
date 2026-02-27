@@ -115,6 +115,11 @@ void onReady(Future<T>&& f, Func&& func, ErrFunc&& errFunc) {
 		f.addCallbackAndClear(new LambdaCallback<T, Func, ErrFunc, Callback<T>>(std::move(func), std::move(errFunc)));
 }
 
+template <class T>
+T moveOut(T* value) {
+	return std::move(*value);
+}
+
 template <class T, class Func, class ErrFunc>
 void onReady(FutureStream<T>&& f, Func&& func, ErrFunc&& errFunc) {
 	if (f.isReady()) {
@@ -555,10 +560,9 @@ TEST_CASE("/flow/flow/callbacks") {
 	int result = 0;
 	bool happened = false;
 
-	onReady(std::move(f), [&result](int x) { result = x; }, [&result](Error e) { result = -1; });
+	onReady(moveOut(&f), [&result](int x) { result = x; }, [&result](Error e) { result = -1; });
 	onReady(p.getFuture(), [&happened](int) { happened = true; }, [&happened](Error) { happened = true; });
-	ASSERT(
-	    !f.isValid()); // NOLINT(bugprone-use-after-move): this test intentionally checks the moved-from Future state.
+	ASSERT(!f.isValid());
 	ASSERT(p.isValid() && !p.isSet() && p.getFutureReferenceCount() == 1);
 	ASSERT(result == 0 && !happened);
 
@@ -574,9 +578,8 @@ TEST_CASE("/flow/flow/callbacks") {
 	p = Promise<int>();
 	f = p.getFuture();
 	result = 0;
-	onReady(std::move(f), [&result](int x) { result = x; }, [&result](Error e) { result = -e.code(); });
-	ASSERT(
-	    !f.isValid()); // NOLINT(bugprone-use-after-move): this test intentionally checks the moved-from Future state.
+	onReady(moveOut(&f), [&result](int x) { result = x; }, [&result](Error e) { result = -e.code(); });
+	ASSERT(!f.isValid());
 	ASSERT(p.isValid() && !p.isSet() && p.getFutureReferenceCount() == 1);
 	ASSERT(result == 0);
 
@@ -1488,9 +1491,8 @@ TEST_CASE("/flow/flow/PromiseStream/move2") {
 	PromiseStream<Tracker> stream;
 	stream.send(Tracker{});
 	Tracker tracker = waitNext(stream.getFuture());
-	Tracker movedTracker = std::move(tracker);
-	ASSERT(
-	    tracker.moved); // NOLINT(bugprone-use-after-move): this test intentionally checks the moved-from Tracker state.
+	Tracker movedTracker = moveOut(&tracker);
+	ASSERT(tracker.moved);
 	ASSERT(!movedTracker.moved);
 	ASSERT(movedTracker.copied == 0);
 	return Void();

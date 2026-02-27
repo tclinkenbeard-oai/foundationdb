@@ -192,7 +192,7 @@ struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
 						// know
 						if (isValid && memcmp(&self->fileValidityMask[info.offset + start],
 						                      &info.data->buffer[start],
-						                      i - start)) {
+						                      i - start) != 0) {
 							printf("Read returned incorrect results at %" PRIu64 " of length %" PRIu64 "\n",
 							       info.offset,
 							       info.length);

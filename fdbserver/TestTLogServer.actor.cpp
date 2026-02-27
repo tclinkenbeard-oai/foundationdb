@@ -393,7 +393,7 @@ ACTOR Future<Void> TLogTestContext::peekCommitMessages(TLogTestContext* pTLogTes
 
 ACTOR Future<Void> buildTLogSet(Reference<TLogTestContext> pTLogTestContext) {
 	state TLogSet tLogSet;
-	state uint16_t processID = 0;
+	state int processID = 0;
 
 	tLogSet.tLogLocalities.push_back(LocalityData());
 	tLogSet.tLogPolicy = Reference<IReplicationPolicy>(new PolicyOne());
@@ -429,7 +429,7 @@ ACTOR Future<Void> startTestsTLogRecoveryActors(TestTLogOptions params) {
 
 	FlowTransport::createInstance(false, 1, WLTOKEN_RESERVED_COUNT);
 
-	state uint16_t tLogIdx = 0;
+	state int tLogIdx = 0;
 
 	TraceEvent("TestTLogServerEnterRecoveryTest");
 

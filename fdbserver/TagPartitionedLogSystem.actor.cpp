@@ -213,7 +213,7 @@ UID TagPartitionedLogSystem::getDebugID() const {
 void TagPartitionedLogSystem::addPseudoLocality(int8_t locality) {
 	ASSERT(locality < 0);
 	pseudoLocalities.insert(locality);
-	for (uint16_t i = 0; i < logRouterTags; i++) {
+	for (int i = 0; i < logRouterTags; i++) {
 		pseudoLocalityPopVersion[Tag(locality, i)] = 0;
 	}
 }
@@ -2261,7 +2261,7 @@ void getTLogLocIds(const std::vector<Reference<LogSet>>& tLogs,
 		if (!it->isLocal) {
 			continue;
 		}
-		for (uint16_t i = 0; i < it->logServers.size(); i++) {
+		for (size_t i = 0; i < it->logServers.size(); i++) {
 			if (it->logServers[i]->get().present()) {
 				interfLocMap[it->logServers[i]->get().interf().id()] = location;
 			}

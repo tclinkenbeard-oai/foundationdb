@@ -37,7 +37,7 @@ ACTOR Future<Void> anyTrue(std::vector<Reference<AsyncVar<bool>>> input, Referen
 	loop {
 		bool oneTrue = false;
 		std::vector<Future<Void>> changes;
-		for (auto it : input) {
+		for (const auto& it : input) {
 			if (it->get())
 				oneTrue = true;
 			changes.push_back(it->onChange());
@@ -111,7 +111,7 @@ ACTOR Future<bool> quorumEqualsTrue(std::vector<Future<bool>> futures, int requi
 ACTOR Future<bool> shortCircuitAny(std::vector<Future<bool>> f) {
 	std::vector<Future<Void>> sc;
 	sc.reserve(f.size());
-	for (Future<bool> fut : f) {
+	for (const Future<bool>& fut : f) {
 		sc.push_back(returnIfTrue(fut));
 	}
 

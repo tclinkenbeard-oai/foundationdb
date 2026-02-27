@@ -146,7 +146,7 @@ private:
 
 		void refreshRolesString() {
 			rolesString = "";
-			for (auto itr : roles) {
+			for (const auto& itr : roles) {
 				if (!rolesString.empty()) {
 					rolesString += ",";
 				}

@@ -171,7 +171,7 @@ std::string IncomingResponse::toString() const {
 }
 
 void writeHeaders(HTTP::Headers const& headers, PacketWriter& writer) {
-	for (auto h : headers) {
+	for (const auto& h : headers) {
 		writer.serializeBytes(h.first);
 		writer.serializeBytes(": "_sr);
 		writer.serializeBytes(h.second);

@@ -1771,7 +1771,7 @@ void TransportData::applyPublicKeySet(StringRef jwkSetString) {
 	const auto& keySet = jwks.get().keys;
 	publicKeys.clear();
 	int numPrivateKeys = 0;
-	for (auto [keyName, key] : keySet) {
+	for (const auto& [keyName, key] : keySet) {
 		// ignore private keys
 		if (key.isPublic()) {
 			publicKeys[keyName] = key.getPublic();

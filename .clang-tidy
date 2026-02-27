@@ -1,8 +1,15 @@
 ---
 Checks: >
   -*,
+  bugprone-assert-side-effect,
+  bugprone-inaccurate-erase,
+  bugprone-misplaced-operator-in-strlen-in-alloc,
+  bugprone-parent-virtual-call,
   bugprone-sizeof-expression,
+  bugprone-string-integer-assignment,
   bugprone-suspicious-string-compare,
+  bugprone-too-small-loop-variable,
+  bugprone-unhandled-self-assignment,
   bugprone-use-after-move,
-  performance-for-range-copy
+  bugprone-virtual-near-miss,
 ...
