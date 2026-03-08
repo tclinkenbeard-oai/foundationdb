@@ -40,6 +40,7 @@ int recordSize;
 int indexSize;
 struct GetMappedRangeWorkload : ApiWorkload {
 	static constexpr auto NAME = "GetMappedRange";
+
 	bool enabled;
 	Snapshot snapshot = Snapshot::False;
 
@@ -433,6 +434,31 @@ struct GetMappedRangeWorkload : ApiWorkload {
 	}
 
 	// checking the max storage queue length is bounded
+	static bool shouldSkipQueueCheck(StatusObjectReader statusObjCluster) {
+		bool dataStateHealthy = true;
+		bool wiggleActive = false;
+		double inQueueBytes = 0;
+		double inFlightBytes = 0;
+		StatusObjectReader statusObjData;
+		StatusObjectReader statusObjDataState;
+		StatusObjectReader movingData;
+		StatusObjectReader storageWiggler;
+
+		if (statusObjCluster.get("data", statusObjData)) {
+			if (statusObjData.get("state", statusObjDataState)) {
+				statusObjDataState.get("healthy", dataStateHealthy);
+			}
+			if (statusObjData.get("moving_data", movingData)) {
+				movingData.get("in_queue_bytes", inQueueBytes);
+				movingData.get("in_flight_bytes", inFlightBytes);
+			}
+		}
+		if (statusObjCluster.get("storage_wiggler", storageWiggler) && storageWiggler.has("wiggle_server_ids")) {
+			wiggleActive = storageWiggler.last().get_array().size() > 0;
+		}
+		return !dataStateHealthy || inQueueBytes > 0 || inFlightBytes > 0 || wiggleActive;
+	}
+
 	ACTOR static Future<Void> reportMetric(GetMappedRangeWorkload* self, Database cx) {
 		loop {
 			StatusObject result = wait(StatusClient::statusFetcher(cx));
@@ -449,6 +475,11 @@ struct GetMappedRangeWorkload : ApiWorkload {
 
 			if (!statusObjCluster.get("processes", processesMap)) {
 				TraceEvent("NoProcesses");
+				wait(delay(waitInterval));
+				continue;
+			}
+			if (shouldSkipQueueCheck(statusObjCluster)) {
+				TraceEvent(SevDebug, "SkipQueryQueueCheck");
 				wait(delay(waitInterval));
 				continue;
 			}
