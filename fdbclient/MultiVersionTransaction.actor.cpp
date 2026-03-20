@@ -1959,7 +1959,7 @@ void MultiVersionApi::addExternalLibrary(std::string path, bool useFutureVersion
 	// library.
 	threadCount = std::max(threadCount, 1);
 
-	if (externalClientDescriptions.count(filename) == 0) {
+	if (!externalClientDescriptions.contains(filename)) {
 		TraceEvent("AddingExternalClient").detail("LibraryPath", filename).detail("UseFutureVersion", useFutureVersion);
 		externalClientDescriptions.emplace(std::make_pair(filename, ClientDesc(path, true, useFutureVersion)));
 	}
@@ -1980,7 +1980,7 @@ void MultiVersionApi::addExternalLibraryDirectory(std::string path) {
 
 	for (auto filename : files) {
 		std::string lib = abspath(joinPath(path, filename));
-		if (externalClientDescriptions.count(filename) == 0) {
+		if (!externalClientDescriptions.contains(filename)) {
 			TraceEvent("AddingExternalClient").detail("LibraryPath", filename);
 			externalClientDescriptions.emplace(std::make_pair(filename, ClientDesc(lib, true, false)));
 		}
@@ -2252,7 +2252,7 @@ void MultiVersionApi::setupNetwork() {
 				bool useFutureVersion = i.second.useFutureVersion;
 
 				// Copy external lib for each thread
-				if (externalClients.count(filename) == 0) {
+				if (!externalClients.contains(filename)) {
 					externalClients[filename] = {};
 					auto libCopies = copyExternalLibraryPerThread(path);
 					for (int idx = 0; idx < libCopies.size(); ++idx) {
@@ -2622,7 +2622,7 @@ void MultiVersionApi::loadEnvironmentVariableNetworkOptions() {
 						}
 						{ // lock scope
 							MutexHolder holder(lock);
-							if (setEnvOptions[option.first].count(currentValue) == 0) {
+							if (!setEnvOptions[option.first].contains(currentValue)) {
 								setNetworkOptionInternal(option.first, currentValue);
 								setEnvOptions[option.first].insert(currentValue);
 							}
@@ -2739,7 +2739,7 @@ public:
 	}
 
 	void error(const Error& e, int& userParam) override {
-		ASSERT(legalErrors.count(e.code()) > 0 ||
+		ASSERT(legalErrors.contains(e.code()) ||
 		       (f.isError() && expectedValue.isError() && f.getError().code() == expectedValue.getError().code()));
 		delete this;
 	}
@@ -3083,7 +3083,7 @@ struct MapTest {
 		newFuture.legalErrors = f.legalErrors;
 		newFuture.future = mapThreadFuture<int, int>(f.future, [f, newFuture](ErrorOr<int> v) {
 			if (v.isError()) {
-				ASSERT(f.legalErrors.count(v.getError().code()) > 0 ||
+				ASSERT(f.legalErrors.contains(v.getError().code()) ||
 				       (f.expectedValue.isError() && f.expectedValue.getError().code() == v.getError().code()));
 			} else {
 				ASSERT(!f.expectedValue.isError() && f.expectedValue.get() == v.get());
@@ -3118,7 +3118,7 @@ struct FlatMapTest {
 		        f.future,
 		        [f, mapFuture](ErrorOr<int> v) {
 			        if (v.isError()) {
-				        ASSERT(f.legalErrors.count(v.getError().code()) > 0 ||
+				        ASSERT(f.legalErrors.contains(v.getError().code()) ||
 				               (f.expectedValue.isError() && f.expectedValue.getError().code() == v.getError().code()));
 			        } else {
 				        ASSERT(!f.expectedValue.isError() && f.expectedValue.get() == v.get());

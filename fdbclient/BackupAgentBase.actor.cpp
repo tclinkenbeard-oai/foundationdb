@@ -1104,7 +1104,7 @@ ACTOR Future<Void> cleanupLogMutations(Database cx, Value destUidValue, bool del
 					minVersion = currVersion;
 				}
 
-				if (!loggedLogUids.count(currLogUid)) {
+				if (!loggedLogUids.contains(currLogUid)) {
 					state Future<Optional<Value>> foundDRKey = tr->get(Subspace(databaseBackupPrefixRange.begin)
 					                                                       .get(BackupAgentBase::keySourceStates)
 					                                                       .get(currLogUid)

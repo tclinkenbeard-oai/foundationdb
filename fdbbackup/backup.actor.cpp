@@ -2939,7 +2939,7 @@ ACTOR Future<Void> queryBackup(const char* name,
 					object["file_name"] = rangeFile.fileName;
 					object["file_size"] = rangeFile.fileSize;
 					object["version"] = rangeFile.version;
-					object["key_range"] = fileSet.get().keyRanges.count(rangeFile.fileName) == 0
+					object["key_range"] = !fileSet.get().keyRanges.contains(rangeFile.fileName)
 					                          ? "none"
 					                          : fileSet.get().keyRanges.at(rangeFile.fileName).toString();
 					rangeFilesJson.push_back(object);
@@ -2989,7 +2989,7 @@ ACTOR Future<Void> queryBackup(const char* name,
 				object["file_name"] = rangeFile.fileName;
 				object["file_size"] = rangeFile.fileSize;
 				object["version"] = rangeFile.version;
-				object["key_range"] = fileSet.get().keyRanges.count(rangeFile.fileName) == 0
+				object["key_range"] = !fileSet.get().keyRanges.contains(rangeFile.fileName)
 				                          ? "none"
 				                          : fileSet.get().keyRanges.at(rangeFile.fileName).toString();
 				rangeFilesJson.push_back(object);

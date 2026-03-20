@@ -394,7 +394,7 @@ ConfigurationResult buildConfiguration(std::vector<StringRef> const& modeTokens,
 		}
 
 		for (auto t = m.begin(); t != m.end(); ++t) {
-			if (outConf.count(t->first)) {
+			if (outConf.contains(t->first)) {
 				TraceEvent(SevWarnAlways, "ConflictingOption")
 				    .detail("Option", t->first)
 				    .detail("Value", t->second)
@@ -405,7 +405,7 @@ ConfigurationResult buildConfiguration(std::vector<StringRef> const& modeTokens,
 		}
 	}
 	auto p = configKeysPrefix.toString();
-	if (!outConf.count(p + "storage_replication_policy") && outConf.count(p + "storage_replicas")) {
+	if (!outConf.contains(p + "storage_replication_policy") && outConf.contains(p + "storage_replicas")) {
 		int storageCount = stoi(outConf[p + "storage_replicas"]);
 		Reference<IReplicationPolicy> storagePolicy = Reference<IReplicationPolicy>(
 		    new PolicyAcross(storageCount, "zoneid", Reference<IReplicationPolicy>(new PolicyOne())));
@@ -414,7 +414,7 @@ ConfigurationResult buildConfiguration(std::vector<StringRef> const& modeTokens,
 		outConf[p + "storage_replication_policy"] = policyWriter.toValue().toString();
 	}
 
-	if (!outConf.count(p + "log_replication_policy") && outConf.count(p + "log_replicas")) {
+	if (!outConf.contains(p + "log_replication_policy") && outConf.contains(p + "log_replicas")) {
 		int logCount = stoi(outConf[p + "log_replicas"]);
 		Reference<IReplicationPolicy> logPolicy = Reference<IReplicationPolicy>(
 		    new PolicyAcross(logCount, "zoneid", Reference<IReplicationPolicy>(new PolicyOne())));
@@ -422,17 +422,17 @@ ConfigurationResult buildConfiguration(std::vector<StringRef> const& modeTokens,
 		serializeReplicationPolicy(policyWriter, logPolicy);
 		outConf[p + "log_replication_policy"] = policyWriter.toValue().toString();
 	}
-	if (outConf.count(p + "istss")) {
+	if (outConf.contains(p + "istss")) {
 		// redo config parameters to be tss config instead of normal config
 
 		// save param values from parsing as a normal config
-		bool isNew = outConf.count(p + "initialized");
+		bool isNew = outConf.contains(p + "initialized");
 		Optional<std::string> count;
 		Optional<std::string> storageEngine;
-		if (outConf.count(p + "count")) {
+		if (outConf.contains(p + "count")) {
 			count = Optional<std::string>(outConf[p + "count"]);
 		}
-		if (outConf.count(p + "storage_engine")) {
+		if (outConf.contains(p + "storage_engine")) {
 			storageEngine = Optional<std::string>(outConf[p + "storage_engine"]);
 		}
 
@@ -472,9 +472,9 @@ ConfigurationResult buildConfiguration(std::string const& configMode, std::map<s
 bool isCompleteConfiguration(std::map<std::string, std::string> const& options) {
 	std::string p = configKeysPrefix.toString();
 
-	return options.count(p + "log_replicas") == 1 && options.count(p + "log_anti_quorum") == 1 &&
-	       options.count(p + "storage_replicas") == 1 && options.count(p + "log_engine") == 1 &&
-	       options.count(p + "storage_engine") == 1;
+	return options.contains(p + "log_replicas") && options.contains(p + "log_anti_quorum") &&
+	       options.contains(p + "storage_replicas") && options.contains(p + "log_engine") &&
+	       options.contains(p + "storage_engine");
 }
 
 ACTOR Future<Void> disableBackupWorker(Database cx) {
@@ -754,7 +754,7 @@ ConfigureAutoResult parseConfig(StatusObject const& status) {
 
 	// if one process on a machine is transaction class, make them all transaction class
 	for (auto& it : count_processes) {
-		if (machinesWithTransaction.count(it.first.second) && !machinesWithStorage.count(it.first.second)) {
+		if (machinesWithTransaction.contains(it.first.second) && !machinesWithStorage.contains(it.first.second)) {
 			for (auto& proc : it.second) {
 				if (proc.second == ProcessClass::UnsetClass &&
 				    proc.second.classSource() == ProcessClass::CommandLineSource) {
@@ -773,7 +773,7 @@ ConfigureAutoResult parseConfig(StatusObject const& status) {
 		if (machinesWithTransaction.size() >= logCount && totalTransactionProcesses >= desiredTotalTransactionProcesses)
 			break;
 
-		if (!machinesWithTransaction.count(it.first.second) && !machinesWithStorage.count(it.first.second)) {
+		if (!machinesWithTransaction.contains(it.first.second) && !machinesWithStorage.contains(it.first.second)) {
 			for (auto& proc : it.second) {
 				if (proc.second == ProcessClass::UnsetClass &&
 				    proc.second.classSource() == ProcessClass::CommandLineSource) {
@@ -1281,7 +1281,7 @@ struct AutoQuorumChange final : IQuorumChange {
 		std::set<Optional<Standalone<StringRef>>> checkDuplicates;
 		for (auto addr : oldCoordinators) {
 			auto findResult = addr_locality.find(addr);
-			if (findResult == addr_locality.end() || checkDuplicates.count(findResult->second.zoneId())) {
+			if (findResult == addr_locality.end() || checkDuplicates.contains(findResult->second.zoneId())) {
 				checkAcceptable = false;
 				break;
 			}
@@ -3938,7 +3938,7 @@ bool schemaMatch(json_spirit::mValue const& schemaValue,
 					schemaCoverage(spath);
 				}
 
-				if (!schema.count(key)) {
+				if (!schema.contains(key)) {
 					errorStr += format("ERROR: Unknown key `%s'\n", kpath.c_str());
 					TraceEvent(sev, "SchemaMismatch").detail("Path", kpath).detail("SchemaPath", spath);
 					ok = false;
@@ -3946,7 +3946,7 @@ bool schemaMatch(json_spirit::mValue const& schemaValue,
 				}
 				auto& sv = schema.at(key);
 
-				if (sv.type() == json_spirit::obj_type && sv.get_obj().count("$enum")) {
+				if (sv.type() == json_spirit::obj_type && sv.get_obj().contains("$enum")) {
 					auto& enum_values = sv.get_obj().at("$enum").get_array();
 
 					bool any_match = false;
@@ -3971,7 +3971,7 @@ bool schemaMatch(json_spirit::mValue const& schemaValue,
 						}
 						ok = false;
 					}
-				} else if (sv.type() == json_spirit::obj_type && sv.get_obj().count("$map")) {
+				} else if (sv.type() == json_spirit::obj_type && sv.get_obj().contains("$map")) {
 					if (rv.type() != json_spirit::obj_type) {
 						errorStr += format("ERROR: Expected an object as the value for key `%s'\n", kpath.c_str());
 						TraceEvent(sev, "SchemaMismatch")

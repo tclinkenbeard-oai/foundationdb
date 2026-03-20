@@ -201,7 +201,7 @@ void JSONDoc::mergeValueInto(json_spirit::mValue& dst, const json_spirit::mValue
 	}
 
 	// Do nothing if d is already an error
-	if (dst.type() == json_spirit::obj_type && dst.get_obj().count("ERROR"))
+	if (dst.type() == json_spirit::obj_type && dst.get_obj().contains("ERROR"))
 		return;
 
 	if (dst.type() != src.type()) {
@@ -559,7 +559,7 @@ ACTOR Future<StatusObject> statusFetcherImpl(Reference<IClusterConnectionRecord>
 						statusObjCluster = _statusObjCluster.get();
 						// TODO: this is a temporary fix, getting the number of available coordinators should move to
 						// the server side
-						if (statusObjCluster.count("fault_tolerance")) {
+						if (statusObjCluster.contains("fault_tolerance")) {
 							StatusObject::Map& faultToleranceWriteable = statusObjCluster["fault_tolerance"].get_obj();
 							StatusObjectReader faultToleranceReader(faultToleranceWriteable);
 							int maxDataLoss, maxAvailLoss;

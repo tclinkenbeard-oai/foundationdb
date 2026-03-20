@@ -178,7 +178,7 @@ ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<RESTCli
 
 		// If err is not present then r is valid.
 		// If r->code is in successCodes then record the successful request and return r.
-		if (!err.present() && successCodes.count(r->code) != 0) {
+		if (!err.present() && successCodes.contains(r->code)) {
 			statsPtr->requests_successful++;
 			return r;
 		}

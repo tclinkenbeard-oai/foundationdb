@@ -1515,7 +1515,7 @@ ACTOR static Future<Void> connectionReader(TransportData* transport,
 							if (connectionId != 1)
 								addr.port = 0;
 
-							if (!transport->multiVersionConnections.count(connectionId)) {
+							if (!transport->multiVersionConnections.contains(connectionId)) {
 								if (now() - transport->lastIncompatibleMessage >
 								    FLOW_KNOBS->CONNECTION_REJECTED_MESSAGE_DELAY) {
 									TraceEvent(SevWarn, "ConnectionRejected", conn->getDebugID())
@@ -1533,7 +1533,7 @@ ACTOR static Future<Void> connectionReader(TransportData* transport,
 									    .detail("ConnectionId", connectionId);
 									transport->lastIncompatibleMessage = now();
 								}
-								if (!transport->incompatiblePeers.count(addr)) {
+								if (!transport->incompatiblePeers.contains(addr)) {
 									transport->incompatiblePeers[addr] = std::make_pair(connectionId, now());
 								}
 							} else if (connectionId > 1) {
@@ -1790,7 +1790,7 @@ ACTOR static Future<Void> multiVersionCleanupWorker(TransportData* self) {
 		wait(delay(FLOW_KNOBS->CONNECTION_CLEANUP_DELAY));
 		bool foundIncompatible = false;
 		for (auto it = self->incompatiblePeers.begin(); it != self->incompatiblePeers.end();) {
-			if (self->multiVersionConnections.count(it->second.first)) {
+			if (self->multiVersionConnections.contains(it->second.first)) {
 				it = self->incompatiblePeers.erase(it);
 			} else {
 				if (now() - it->second.second > FLOW_KNOBS->INCOMPATIBLE_PEER_DELAY_BEFORE_LOGGING) {
@@ -1850,7 +1850,7 @@ const std::unordered_map<NetworkAddress, Reference<Peer>>& FlowTransport::getAll
 
 std::map<NetworkAddress, std::pair<uint64_t, double>>* FlowTransport::getIncompatiblePeers() {
 	for (auto it = self->incompatiblePeers.begin(); it != self->incompatiblePeers.end();) {
-		if (self->multiVersionConnections.count(it->second.first)) {
+		if (self->multiVersionConnections.contains(it->second.first)) {
 			it = self->incompatiblePeers.erase(it);
 		} else {
 			it++;

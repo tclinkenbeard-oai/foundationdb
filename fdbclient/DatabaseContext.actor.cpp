@@ -956,7 +956,7 @@ void updateLocationCacheWithCaches(DatabaseContext* self,
 			interfaces.reserve(val->size() - removed.size() + added.size());
 			for (int i = 0; i < val->size(); ++i) {
 				const auto& interf = (*val)[i];
-				if (removed.count(interf->interf.id()) == 0) {
+				if (!removed.contains(interf->interf.id())) {
 					interfaces.emplace_back(interf);
 				}
 			}

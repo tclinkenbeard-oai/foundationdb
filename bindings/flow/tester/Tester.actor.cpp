@@ -571,7 +571,7 @@ struct UseTransactionFunc : InstructionFunc {
 		Standalone<StringRef> name = wait(items[0].value);
 		data->trName = name;
 
-		if (trMap.count(data->trName) == 0) {
+		if (!trMap.contains(data->trName)) {
 			trMap[data->trName] = data->db->createTransaction();
 		}
 		return Void();
@@ -1768,7 +1768,7 @@ ACTOR static Future<Void> doInstructions(Reference<FlowTesterData> data) {
 			}
 
 			if (isDirectory) {
-				if (opsThatCreateDirectories.count(op.toString())) {
+				if (opsThatCreateDirectories.contains(op.toString())) {
 					data->directoryData.directoryList.push_back(DirectoryOrSubspace());
 				}
 				data->stack.pushTuple("DIRECTORY_ERROR"_sr);

@@ -6699,7 +6699,7 @@ ACTOR static Future<int64_t> rebootWorkerActor(DatabaseContext* cx, ValueRef add
 	state std::vector<Future<bool>> verifyInterfs;
 	for (const auto& requestedAddress : addressesVec) {
 		// step 1: check that the requested address is in the worker list provided by CC
-		if (!workerInterfaces.count(Key(requestedAddress)))
+		if (!workerInterfaces.contains(Key(requestedAddress)))
 			return 0;
 		// step 2: try to establish connections to the requested worker
 		verifyInterfs.push_back(verifyInterfaceActor(connectLock, workerInterfaces[Key(requestedAddress)]));

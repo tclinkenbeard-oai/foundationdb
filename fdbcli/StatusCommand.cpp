@@ -357,7 +357,7 @@ void printStatus(StatusObjectReader statusObj,
 						if (!msgObj.get("name", messageName)) {
 							continue;
 						}
-						if (skipMsgs.count(messageName)) {
+						if (skipMsgs.contains(messageName)) {
 							continue;
 						} else if (messageName == "client_issues") {
 							if (msgObj.has("issues")) {

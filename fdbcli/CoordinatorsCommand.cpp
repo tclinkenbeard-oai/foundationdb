@@ -108,7 +108,7 @@ Future<bool> changeCoordinators(Reference<IDatabase> db, std::vector<StringRef> 
 						if (Hostname::isHostname(t->toString())) {
 							// We do not resolve hostnames here. We commit them as is.
 							const auto& hostname = Hostname::parse(t->toString());
-							if (new_coordinators_hostnames.count(hostname)) {
+							if (new_coordinators_hostnames.contains(hostname)) {
 								fprintf(stderr,
 								        "ERROR: passed redundant coordinators: `%s'\n",
 								        hostname.toString().c_str());
@@ -118,7 +118,7 @@ Future<bool> changeCoordinators(Reference<IDatabase> db, std::vector<StringRef> 
 							newCoordinatorslist.push_back(hostname.toString());
 						} else {
 							const auto& addr = NetworkAddress::parse(t->toString());
-							if (new_coordinators_addresses.count(addr)) {
+							if (new_coordinators_addresses.contains(addr)) {
 								fprintf(
 								    stderr, "ERROR: passed redundant coordinators: `%s'\n", addr.toString().c_str());
 								co_return true;

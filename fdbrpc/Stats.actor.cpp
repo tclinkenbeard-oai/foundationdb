@@ -183,7 +183,7 @@ LatencyBands::LatencyBands(std::string const& name,
   : name(name), id(id), loggingInterval(loggingInterval), decorator(decorator) {}
 
 void LatencyBands::addThreshold(double value) {
-	if (value > 0 && bands.count(value) == 0) {
+	if (value > 0 && !bands.contains(value)) {
 		if (bands.size() == 0) {
 			ASSERT(!cc && !filteredCount);
 			cc = std::make_unique<CounterCollection>(name, id.toString());

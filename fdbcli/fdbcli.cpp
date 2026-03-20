@@ -1243,7 +1243,7 @@ Future<int> cli(CLIOptions opt, LineNoise* plinenoise, Reference<ClusterConnecti
 					printf("\n");
 				}
 
-				if (!helpMap.count(tokens[0].toString()) && !hiddenCommands.count(tokens[0].toString())) {
+				if (!helpMap.contains(tokens[0].toString()) && !hiddenCommands.contains(tokens[0].toString())) {
 					fprintf(stderr, "ERROR: Unknown command `%s'. Try `help'?\n", formatStringRef(tokens[0]).c_str());
 					is_error = true;
 					continue;
