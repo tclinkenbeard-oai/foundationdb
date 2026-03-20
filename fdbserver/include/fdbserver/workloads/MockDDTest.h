@@ -20,11 +20,15 @@
 #ifndef FOUNDATIONDB_MOCKDDTEST_H
 #define FOUNDATIONDB_MOCKDDTEST_H
 
+#include <memory>
+
 #include "fdbserver/core/workloads.actor.h"
 #include "fdbserver/datadistributor/DDSharedContext.h"
 #include "fdbserver/datadistributor/DDTxnProcessor.h"
 #include "fdbserver/core/MoveKeys.h"
 #include "fdbclient/StorageServerInterface.h"
+
+class MockGlobalState;
 
 // other Mock DD workload can derive from this class to use the common settings
 struct MockDDTestWorkload : public TestWorkload {

@@ -139,6 +139,9 @@ add_fdbserver_link_test(fdbserver_tloglinktest
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/workloads)
 
 add_flow_target(EXECUTABLE NAME fdbserver SRCS ${FDBSERVER_SRCS})
+target_include_directories(fdbserver PRIVATE
+  ${CMAKE_SOURCE_DIR}/fdbserver/datadistributor
+  ${CMAKE_BINARY_DIR}/fdbserver/datadistributor)
 
 if (WITH_SWIFT)
   # Setup the Swift sources in FDBServer.

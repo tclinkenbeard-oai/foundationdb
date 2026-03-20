@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-#include "fdbserver/datadistributor/MockGlobalState.h"
+#include "MockGlobalState.h"
 #include "fdbserver/core/workloads.actor.h"
 #include "fdbserver/datadistributor/DataDistribution.h"
 #include "fdbclient/FDBTypes.h"

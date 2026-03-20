@@ -20,7 +20,9 @@
 
 #include "fdbclient/FDBOptions.g.h"
 #include "fdbclient/ManagementAPI.actor.h"
+#include "fdbserver/datadistributor/DataDistribution.h"
 #include "fdbserver/datadistributor/DDSharedContext.h"
+#include "MockGlobalState.h"
 #include "fdbserver/datadistributor/DDTxnProcessor.h"
 #include "fdbserver/core/MoveKeys.h"
 #include "fdbclient/StorageServerInterface.h"

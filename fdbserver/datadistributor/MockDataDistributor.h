@@ -20,9 +20,9 @@
 #ifndef FOUNDATIONDB_MOCKDATADISTRIBUTOR_H
 #define FOUNDATIONDB_MOCKDATADISTRIBUTOR_H
 
-#include "fdbserver/datadistributor/DataDistribution.h"
 #include "fdbserver/datadistributor/DDSharedContext.h"
-#include "fdbserver/datadistributor/MockGlobalState.h"
+
+class DDMockTxnProcessor;
 
 class MockDataDistributor {
 public:

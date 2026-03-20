@@ -21,6 +21,9 @@
 #include "fdbserver/datadistributor/DDSharedContext.h"
 
 #include "DDRelocationQueue.h"
+#include "DDShardTracker.h"
+#include "fdbserver/datadistributor/DDTeamCollection.h"
+#include "fdbserver/datadistributor/ShardsAffectedByTeamFailure.h"
 
 DDSharedContext::DDSharedContext() = default;
 

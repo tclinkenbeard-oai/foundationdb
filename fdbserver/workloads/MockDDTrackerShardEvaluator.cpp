@@ -19,6 +19,8 @@
  */
 
 #include "fdbserver/workloads/MockDDTest.h"
+#include "DDShardTracker.h"
+#include "MockGlobalState.h"
 #include "flow/CoroUtils.h"
 
 class MockDDTrackerShardEvaluatorWorkload : public MockDDTestWorkload {

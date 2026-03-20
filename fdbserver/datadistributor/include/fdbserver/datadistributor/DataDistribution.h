@@ -30,9 +30,9 @@
 #include "fdbserver/core/ShardSizing.h"
 #include "fdbclient/RunRYWTransaction.actor.h"
 #include "fdbserver/datadistributor/DDTxnProcessor.h"
+#include "fdbserver/datadistributor/DataDistributionTeam.h"
 #include "fdbserver/core/LogSystem.h"
 #include "fdbserver/datadistributor/ShardsAffectedByTeamFailure.h"
-#include "fdbserver/datadistributor/TCInfo.h"
 #include "fdbclient/StorageWiggleMetrics.actor.h"
 #include "fdbclient/DataDistributionConfig.actor.h"
 #include <boost/heap/policies.hpp>

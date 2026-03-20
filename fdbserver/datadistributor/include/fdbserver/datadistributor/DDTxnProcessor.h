@@ -21,15 +21,18 @@
 #ifndef FOUNDATIONDB_DDTXNPROCESSOR_H
 #define FOUNDATIONDB_DDTXNPROCESSOR_H
 
+#include <memory>
+
 #include "fdbserver/core/Knobs.h"
 #include "fdbserver/core/MoveKeys.h"
 #include "flow/FastRef.h"
-#include "fdbserver/datadistributor/MockGlobalState.h"
 
 FDB_BOOLEAN_PARAM(SkipDDModeCheck);
 
 struct InitialDataDistribution;
 struct DDShardInfo;
+class MockGlobalState;
+class ShardsAffectedByTeamFailure;
 
 struct ServerWorkerInfos {
 	std::vector<std::pair<StorageServerInterface, ProcessClass>> servers;

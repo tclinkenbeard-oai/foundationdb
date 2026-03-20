@@ -21,11 +21,11 @@
 #define FOUNDATIONDB_DDSHAREDCONTEXT_H
 #include "fdbserver/core/DataDistributorInterface.h"
 #include "fdbserver/core/MoveKeys.h"
-#include "fdbserver/datadistributor/DDShardTracker.h"
-#include "fdbserver/datadistributor/ShardsAffectedByTeamFailure.h"
-#include "fdbserver/datadistributor/DDTeamCollection.h"
 
 class DDQueue;
+class DataDistributionTracker;
+class ShardsAffectedByTeamFailure;
+class DDTeamCollection;
 
 // The common info shared by all DD components. Normally the DD components should share the reference to the same
 // context.

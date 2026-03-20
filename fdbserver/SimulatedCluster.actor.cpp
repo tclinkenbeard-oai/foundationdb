@@ -60,7 +60,7 @@
 #include "flow/CodeProbeUtils.h"
 #include "fdbserver/datadistributor/SimulatedCluster.h"
 #include "flow/IConnection.h"
-#include "fdbserver/datadistributor/MockGlobalState.h"
+#include "MockGlobalState.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 #undef max

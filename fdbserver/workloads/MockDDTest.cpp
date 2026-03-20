@@ -20,6 +20,8 @@
 
 #include "fdbserver/workloads/MockDDTest.h"
 
+#include "MockGlobalState.h"
+
 KeyRange MockDDTestWorkload::getRandomRange(double offset) const {
 	double len = deterministicRandom()->random01() * this->maxKeyspace;
 	double pos = offset + deterministicRandom()->random01() * (1.0 - len);
