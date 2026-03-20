@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-#include "fdbserver/logsystem/TagPartitionedLogSystem.actor.h"
+#include "TagPartitionedLogSystem.actor.h"
 
 #include <boost/dynamic_bitset.hpp>
 #include <utility>
