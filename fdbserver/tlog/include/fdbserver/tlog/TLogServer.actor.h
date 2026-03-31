@@ -52,7 +52,5 @@ ACTOR Future<Void> tLog(IKeyValueStore* persistentData,
                         Reference<AsyncVar<UID>> activeSharedTLog,
                         Reference<AsyncVar<bool>> enablePrimaryTxnSystemHealthCheck);
 
-using TLogFn = decltype(&tLog);
-
 #include "flow/unactorcompiler.h"
 #endif

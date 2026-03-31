@@ -419,23 +419,6 @@ struct TLogOptions {
 	}
 };
 
-TLogFn tLogFnForOptions(TLogOptions options) {
-	switch (options.version) {
-	case TLogVersion::V2:
-	case TLogVersion::V3:
-	case TLogVersion::V4:
-		ASSERT(false); // V2 to V4 are no longer supported
-
-	case TLogVersion::V5:
-	case TLogVersion::V6:
-	case TLogVersion::V7:
-		return tLog;
-	default:
-		ASSERT(false);
-	}
-	return tLog;
-}
-
 struct DiskStore {
 	enum COMPONENT { TLogData, Storage, BlobWorker, UNSET };
 
@@ -2001,11 +1984,8 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 	state Reference<AsyncVar<std::set<std::string>>> traceLogIssues(new AsyncVar<std::set<std::string>>());
 	state Reference<AsyncVar<std::set<std::string>>> tlogIssues(new AsyncVar<std::set<std::string>>());
 	state Reference<AsyncVar<bool>> lowDiskTLogExclusion(new AsyncVar<bool>(false));
-	// tLogFnForOptions() can return a function that doesn't correspond with the FDB version that the
-	// TLogVersion represents.  This can be done if the newer TLog doesn't support a requested option.
-	// As (store type, spill type) can map to the same TLogFn across multiple TLogVersions, we need to
-	// decide if we should collapse them into the same SharedTLog instance as well.  The answer
-	// here is no, so that when running with log_version==3, all files should say V=3.
+	// Even though a single tLog implementation now handles all supported versions, shared logs remain keyed by
+	// TLogVersion so each on-disk file retains the versioned prefix it was created with.
 	state std::map<SharedLogsKey, std::vector<SharedLogsValue>> sharedLogs;
 	state Reference<AsyncVar<UID>> activeSharedTLog(new AsyncVar<UID>());
 	state WorkerCache<InitializeBackupReply> backupWorkerCache;
@@ -2241,27 +2221,27 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 
 				Promise<Void> oldLog;
 				Promise<Void> recovery;
-				TLogFn tLogFn = tLogFnForOptions(s.tLogOptions);
+				ASSERT(s.tLogOptions.version >= TLogVersion::V5);
 				auto& logData = sharedLogs[SharedLogsKey(s.tLogOptions, s.storeType)];
 				logData.push_back(SharedLogsValue());
 				// META-FIXME: Address or remove the 2019 comment below.
 				// FIXME: Shouldn't if logData.first isValid && !isReady, shouldn't we
 				// be sending a fake InitializeTLogRequest rather than calling tLog() ?
-				Future<Void> tl = tLogFn(kv,
-				                         queue,
-				                         dbInfo,
-				                         locality,
-				                         logData.back().requests,
-				                         s.storeID,
-				                         interf.id(),
-				                         true,
-				                         oldLog,
-				                         recovery,
-				                         folder,
-				                         degraded,
-				                         lowDiskTLogExclusion,
-				                         activeSharedTLog,
-				                         enablePrimaryTxnSystemHealthCheck);
+				Future<Void> tl = tLog(kv,
+				                       queue,
+				                       dbInfo,
+				                       locality,
+				                       logData.back().requests,
+				                       s.storeID,
+				                       interf.id(),
+				                       true,
+				                       oldLog,
+				                       recovery,
+				                       folder,
+				                       degraded,
+				                       lowDiskTLogExclusion,
+				                       activeSharedTLog,
+				                       enablePrimaryTxnSystemHealthCheck);
 				recoveries.push_back(recovery.getFuture());
 				activeSharedTLog->set(s.storeID);
 
@@ -2546,10 +2526,6 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 				}
 			}
 			when(InitializeTLogRequest req = waitNext(interf.tLog.getFuture())) {
-				// For now, there's a one-to-one mapping of spill type to TLogVersion.
-				// With future work, a particular version of the TLog can support multiple
-				// different spilling strategies, at which point SpillType will need to be
-				// plumbed down into tLogFn.
 				if (req.logVersion < TLogVersion::MIN_RECRUITABLE) {
 					TraceEvent(SevError, "InitializeTLogInvalidLogVersion")
 					    .detail("Version", req.logVersion)
@@ -2559,7 +2535,6 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 				LocalLineage _;
 				getCurrentLineage()->modify(&RoleLineage::role) = ProcessClass::ClusterRole::TLog;
 				TLogOptions tLogOptions(req.logVersion, req.spillType);
-				TLogFn tLogFn = tLogFnForOptions(tLogOptions);
 				auto& logData = sharedLogs[SharedLogsKey(tLogOptions, req.storeType)];
 				while (!logData.empty() && (!logData.back().actor.isValid() || logData.back().actor.isReady())) {
 					logData.pop_back();
@@ -2591,21 +2566,25 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 					filesClosed.add(queue->onClosed());
 
 					logData.push_back(SharedLogsValue());
-					Future<Void> tLogCore = tLogFn(data,
-					                               queue,
-					                               dbInfo,
-					                               locality,
-					                               logData.back().requests,
-					                               logId,
-					                               interf.id(),
-					                               false,
-					                               Promise<Void>(),
-					                               Promise<Void>(),
-					                               folder,
-					                               degraded,
-					                               lowDiskTLogExclusion,
-					                               activeSharedTLog,
-					                               enablePrimaryTxnSystemHealthCheck);
+					// For now, there's a one-to-one mapping of spill type to TLogVersion.
+					// With future work, a particular version of the TLog can support multiple
+					// different spilling strategies, at which point SpillType will need to be
+					// plumbed down into tLog.
+					Future<Void> tLogCore = tLog(data,
+					                             queue,
+					                             dbInfo,
+					                             locality,
+					                             logData.back().requests,
+					                             logId,
+					                             interf.id(),
+					                             false,
+					                             Promise<Void>(),
+					                             Promise<Void>(),
+					                             folder,
+					                             degraded,
+					                             lowDiskTLogExclusion,
+					                             activeSharedTLog,
+					                             enablePrimaryTxnSystemHealthCheck);
 					tLogCore = handleIOErrors(tLogCore, data, logId);
 					tLogCore = handleIOErrors(tLogCore, queue, logId);
 					errorForwarders.add(forwardError(errors, Role::SHARED_TRANSACTION_LOG, logId, tLogCore));
