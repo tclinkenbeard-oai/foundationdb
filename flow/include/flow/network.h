@@ -32,7 +32,9 @@
 #include <string>
 #include <stdint.h>
 #include <atomic>
-#include <unordered_map>
+#include <array>
+#include <utility>
+#include <vector>
 #include "flow/IRandom.h"
 #include "flow/ProtocolVersion.h"
 #include "flow/WriteOnlySet.h"
@@ -65,10 +67,27 @@ struct NetworkMetrics {
 		double windowedTimer = 0;
 		double maxDuration = 0;
 
-		PriorityStats(TaskPriority priority) : priority(priority) {}
+		constexpr PriorityStats(TaskPriority priority) : priority(priority) {}
 	};
 
-	std::unordered_map<TaskPriority, struct PriorityStats> activeTrackers;
+	template <size_t... Is>
+	static constexpr std::array<PriorityStats, knownTaskPriorities.size()> makeKnownActiveTrackers(
+	    std::index_sequence<Is...>) {
+		return { PriorityStats(knownTaskPriorities[Is])... };
+	}
+
+	static constexpr std::array<PriorityStats, knownTaskPriorities.size()> makeKnownActiveTrackers() {
+		return makeKnownActiveTrackers(std::make_index_sequence<knownTaskPriorities.size()>{});
+	}
+
+	PriorityStats& getActiveTracker(TaskPriority priority) {
+		priority = normalizeTaskPriorityDown(priority);
+		const int knownIndex = getKnownTaskPriorityIndex(priority);
+		ASSERT(knownIndex >= 0);
+		return activeTrackers[knownIndex];
+	}
+
+	std::array<struct PriorityStats, knownTaskPriorities.size()> activeTrackers;
 	double lastRunLoopBusyness; // network thread busyness (measured every 5s by default)
 	std::atomic<double>
 	    networkBusyness; // network thread busyness which is returned to the the client (measured every 1s by default)
@@ -80,7 +99,7 @@ struct NetworkMetrics {
 	static const std::vector<int> starvationBins;
 
 	NetworkMetrics()
-	  : lastRunLoopBusyness(0), networkBusyness(0),
+	  : activeTrackers(makeKnownActiveTrackers()), lastRunLoopBusyness(0), networkBusyness(0),
 	    starvationTrackerNetworkBusyness(PriorityStats(static_cast<TaskPriority>(starvationBins.at(0)))) {
 		for (int priority : starvationBins) { // initialize starvation trackers with given priorities
 			starvationTrackers.emplace_back(static_cast<TaskPriority>(priority));

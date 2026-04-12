@@ -191,8 +191,8 @@ public:
 	bool check_yield(TaskPriority taskId) override;
 	TaskPriority getCurrentTask() const override { return currentTaskID; }
 	void setCurrentTask(TaskPriority taskID) override {
-		currentTaskID = taskID;
-		priorityMetric = (int64_t)taskID;
+		currentTaskID = normalizeTaskPriorityDown(taskID);
+		priorityMetric = (int64_t)currentTaskID;
 	}
 	void onMainThread(Promise<Void>&& signal, TaskPriority taskID) override;
 	bool isOnMainThread() const override { return thread_network == this; }
@@ -1839,9 +1839,9 @@ void Net2::updateStarvationTracker(struct NetworkMetrics::PriorityStats& binStat
 void Net2::trackAtPriority(TaskPriority priority, double now) {
 	if (lastPriorityStats == nullptr || priority != lastPriorityStats->priority) {
 		// Start tracking current priority
-		auto activeStatsItr = networkInfo.metrics.activeTrackers.try_emplace(priority, priority);
-		activeStatsItr.first->second.active = true;
-		activeStatsItr.first->second.windowedTimer = now;
+		auto& activeStats = networkInfo.metrics.getActiveTracker(priority);
+		activeStats.active = true;
+		activeStats.windowedTimer = now;
 
 		if (lastPriorityStats != nullptr) {
 			// Stop tracking previous priority
@@ -1861,7 +1861,7 @@ void Net2::trackAtPriority(TaskPriority priority, double now) {
 		// Update starvation trackers for network busyness
 		updateStarvationTracker(networkInfo.metrics.starvationTrackerNetworkBusyness, priority, lastPriority, now);
 
-		lastPriorityStats = &activeStatsItr.first->second;
+		lastPriorityStats = &activeStats;
 	}
 }
 
@@ -1908,6 +1908,8 @@ bool Net2::check_yield(TaskPriority taskID, int64_t tscNow) {
 
 	if (taskID == TaskPriority::DefaultYield)
 		taskID = currentTaskID;
+	else
+		taskID = normalizeTaskPriorityDown(taskID);
 	if (taskQueue.hasReadyTask() && taskQueue.getReadyTaskPriority() > int64_t(taskID) << 32) {
 		return true;
 	}
@@ -1937,6 +1939,8 @@ Future<class Void> Net2::yield(TaskPriority taskID) {
 	++countYieldCalls;
 	if (taskID == TaskPriority::DefaultYield)
 		taskID = currentTaskID;
+	else
+		taskID = normalizeTaskPriorityDown(taskID);
 	if (check_yield(taskID)) {
 		++countYieldCallsTrue;
 		return delay(0, taskID);
@@ -1951,6 +1955,7 @@ Future<Void> Net2::delay(double seconds, TaskPriority taskId) {
 	                     // as infinite
 		return Never();
 
+	taskId = normalizeTaskPriorityDown(taskId);
 	auto* t = new PromiseTask;
 	if (seconds <= 0.) {
 		taskQueue.addReady(taskId, t);
@@ -1969,7 +1974,7 @@ Future<Void> Net2::orderedDelay(double seconds, TaskPriority taskId) {
 void Net2::_swiftEnqueue(void* _job) {
 #ifdef WITH_SWIFT
 	auto* job = (swift::Job*)_job;
-	TaskPriority priority = swift_priority_to_net2(job->getPriority());
+	TaskPriority priority = normalizeTaskPriorityDown(swift_priority_to_net2(job->getPriority()));
 	auto* t = new PromiseTask(job);
 	taskQueue.addReady(priority, t);
 #endif
@@ -1978,6 +1983,7 @@ void Net2::_swiftEnqueue(void* _job) {
 void Net2::onMainThread(Promise<Void>&& signal, TaskPriority taskID) {
 	if (stopped)
 		return;
+	taskID = normalizeTaskPriorityDown(taskID);
 	auto* p = new PromiseTask(std::move(signal));
 	if (taskQueue.addReadyThreadSafe(isOnMainThread(), taskID, p)) {
 		reactor.wake();

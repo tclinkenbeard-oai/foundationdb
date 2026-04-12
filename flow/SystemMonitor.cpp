@@ -320,17 +320,21 @@ SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsSta
 			}
 
 			std::map<TaskPriority, double> loggedDurations;
-			for (auto& itr : g_network->networkInfo.metrics.activeTrackers) {
-				if (itr.second.active) {
-					itr.second.duration += now() - itr.second.windowedTimer;
-					itr.second.windowedTimer = now();
+			const auto logTracker = [&](auto& tracker) {
+				if (tracker.active) {
+					tracker.duration += now() - tracker.windowedTimer;
+					tracker.windowedTimer = now();
 				}
 
-				if (itr.second.duration / currentStats.elapsed >= FLOW_KNOBS->MIN_LOGGED_PRIORITY_BUSY_FRACTION) {
-					loggedDurations[itr.first] = std::min(currentStats.elapsed, itr.second.duration);
+				if (tracker.duration / currentStats.elapsed >= FLOW_KNOBS->MIN_LOGGED_PRIORITY_BUSY_FRACTION) {
+					loggedDurations[tracker.priority] = std::min(currentStats.elapsed, tracker.duration);
 				}
 
-				itr.second.duration = 0;
+				tracker.duration = 0;
+			};
+
+			for (auto& tracker : g_network->networkInfo.metrics.activeTrackers) {
+				logTracker(tracker);
 			}
 
 			for (auto const& itr : loggedDurations) {
