@@ -11,6 +11,10 @@ service JoshuaProxy {
       returns (UploadCorrectnessTarballReply);
   // Returns the current status of a previously submitted job.
   rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusReply);
+  // Stops a previously submitted/running job.
+  rpc StopJob(StopJobRequest) returns (StopJobReply);
+  // Returns full failure outputs for a previously submitted ensemble/job.
+  rpc GetFailureDetails(GetFailureDetailsRequest) returns (GetFailureDetailsReply);
   // Lists Joshua ensembles for a selected listing mode.
   rpc ListEnsembles(ListEnsemblesRequest) returns (ListEnsemblesReply);
 }
@@ -25,6 +29,11 @@ message SubmitJobRequest {
   string commit_hash = 3;
   // Optional free-form description to persist on the Joshua ensemble.
   string description = 4;
+  // Optional maximum number of failed tests before Joshua stops the ensemble.
+  // Defaults to the server's fail-fast threshold when unset/zero.
+  uint64 max_test_failures = 5;
+  // Optional TestHarness2 include-test-files regex for targeted ensembles.
+  string test_filter = 6;
 }
 
 // Response payload for SubmitJob.
@@ -65,6 +74,18 @@ message GetJobStatusRequest {
   string job_id = 1;
 }
 
+// Request payload for StopJob.
+message StopJobRequest {
+  // Job ID returned from SubmitJob.
+  string job_id = 1;
+}
+
+// Response payload for StopJob.
+message StopJobReply {
+  // Job ID that was stopped.
+  string job_id = 1;
+}
+
 // Response payload for GetJobStatus.
 message GetJobStatusReply {
   // Joshua job identifier.
@@ -79,6 +100,8 @@ message GetJobStatusReply {
   string submitted = 9;
   // Joshua ensemble stop timestamp (UTC), when available.
   string stopped = 10;
+  // TestHarness2 include-test-files regex persisted on the Joshua ensemble, when provided.
+  string test_filter = 11;
   // Current job status.
   oneof status {
     Success success = 2;
@@ -86,6 +109,38 @@ message GetJobStatusReply {
     Running running = 4;
     Failed failed = 5;
   }
+}
+
+// Request payload for GetFailureDetails.
+message GetFailureDetailsRequest {
+  // Job/ensemble ID returned from SubmitJob.
+  string job_id = 1;
+  // Maximum number of failure entries to return. Returns all when unset/zero.
+  uint32 limit = 2;
+}
+
+// Response payload for GetFailureDetails.
+message GetFailureDetailsReply {
+  // Joshua job identifier.
+  string joshua_job_id = 1;
+  // Full failure details for the ensemble.
+  repeated FailureDetail failures = 2;
+}
+
+// Full details for an individual failed test result row.
+message FailureDetail {
+  // Name of the failing test.
+  string test_name = 1;
+  // Seed used for the failing test.
+  uint64 seed = 2;
+  // Whether buggify was enabled for the failing test (when known).
+  optional bool buggify_enabled = 3;
+  // Full output payload recorded by Joshua for the failure.
+  string output = 4;
+  // Joshua agent host/instance that produced the failure (when known).
+  string agent = 5;
+  // Raw Joshua result code for the failure row (when known).
+  sint64 result_code = 6;
 }
 
 // Request payload for ListEnsembles.
@@ -125,6 +180,8 @@ message JobStatus {
   string submitted = 10;
   // Joshua ensemble stop timestamp (UTC), when available.
   string stopped = 11;
+  // TestHarness2 include-test-files regex persisted on the Joshua ensemble, when provided.
+  string test_filter = 12;
   // Current job status.
   oneof status {
     Success success = 3;
