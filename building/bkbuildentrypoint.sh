@@ -112,6 +112,64 @@ save_buildx_cache() {
     --cache-dest "${cache_dest}"
 }
 
+collect_changed_cpp_header_files() {
+  local diff_range=""
+  local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}"
+  local base_ref=""
+  local merge_base=""
+
+  if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" && -n "${base_branch}" ]]; then
+    base_ref="origin/${base_branch}"
+    if ! git rev-parse --verify --quiet "${base_ref}" >/dev/null; then
+      git fetch --quiet origin "${base_branch}" || true
+    fi
+    if git rev-parse --verify --quiet "${base_ref}" >/dev/null; then
+      if merge_base="$(git merge-base HEAD "${base_ref}")"; then
+        diff_range="${merge_base}...HEAD"
+      fi
+    fi
+  fi
+
+  if [[ -z "${diff_range}" ]]; then
+    if git rev-parse --verify --quiet HEAD~1 >/dev/null; then
+      diff_range="HEAD~1..HEAD"
+    else
+      diff_range="$(git hash-object -t tree /dev/null)..HEAD"
+    fi
+  fi
+
+  git diff --name-only --diff-filter=ACMR "${diff_range}" -- '*.h' '*.cpp'
+}
+
+run_clang_format_check_in_docker() {
+  local changed_files
+  local clang_format_image
+
+  mapfile -t changed_files < <(
+    collect_changed_cpp_header_files | while IFS= read -r path; do
+      [[ -f "${path}" ]] && printf '%s\n' "${path}"
+    done
+  )
+
+  if (( ${#changed_files[@]} == 0 )); then
+    echo "No changed *.h or *.cpp files found; skipping clang-format"
+    return 0
+  fi
+
+  if ! command -v docker >/dev/null; then
+    echo "docker is required to run clang-format check in container" >&2
+    return 1
+  fi
+
+  clang_format_image="${CLANG_FORMAT_IMAGE:-foundationdb/devel:rockylinux9-latest}"
+  echo "Checking clang-format for ${#changed_files[@]} changed *.h/*.cpp files in ${clang_format_image}"
+  docker run --rm \
+    -v "$(pwd):/workspace" \
+    -w /workspace \
+    "${clang_format_image}" \
+    clang-format --dry-run -Werror "${changed_files[@]}"
+}
+
 echo "--- Blobstore preflight"
 dest="$(resolve_dest)"
 echo "~~~ Creating preflight artifact"
@@ -146,6 +204,13 @@ if [[ "${JOSHUA_PROXY_INSECURE:-}" == "1" ]]; then
 fi
 if ! "${smoke_args[@]}"; then
   exit 1
+fi
+
+echo "--- clang-format"
+if ! command -v git >/dev/null; then
+  echo "git not found; skipping clang-format on changed files"
+else
+  run_clang_format_check_in_docker
 fi
 
 echo "--- Building artifacts"
