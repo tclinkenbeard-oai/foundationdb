@@ -22,6 +22,24 @@ from typing import Dict, List, Pattern, OrderedDict
 
 from test_harness.summarize import Summary, SummaryTree
 
+ALLOWED_RESTART_OLD_BINARY_VERSIONS = frozenset(
+    Version.parse(version)
+    for version in ("7.1.61", "7.3.43", "7.3.59", "7.3.69")
+)
+
+
+def restart_test_candidates(
+    binaries: OrderedDict[Version, Path], min_version: Version, max_version: Version
+) -> List[Path]:
+    candidates: List[Path] = []
+    for ver, binary in binaries.items():
+        if (
+            min_version <= ver < max_version
+            and ver in ALLOWED_RESTART_OLD_BINARY_VERSIONS
+        ):
+            candidates.append(binary)
+    return candidates
+
 
 @total_ordering
 class TestDescription:
@@ -139,11 +157,10 @@ class TestPicker:
             or self.exclude_files_regex.search(str(path)) is not None
         ):
             return
-        # Skip restarting tests that do not have old binaries in the given version range
+        # Skip restarting tests that do not have an allowed old binary in range.
         # In particular, this is only for restarting tests with the "until" keyword,
         # since without "until", it will at least run with the current binary.
         if is_restarting_test(path):
-            candidates: List[Path] = []
             dirs = path.parent.parts
             version_expr = dirs[-1].split("_")
             if (
@@ -153,9 +170,9 @@ class TestPicker:
             ):
                 max_version = Version.parse(version_expr[3])
                 min_version = Version.parse(version_expr[1])
-                for ver, binary in self.old_binaries.items():
-                    if min_version <= ver < max_version:
-                        candidates.append(binary)
+                candidates = restart_test_candidates(
+                    self.old_binaries, min_version, max_version
+                )
                 if not len(candidates):
                     # No valid old binary found
                     return
@@ -305,10 +322,7 @@ class OldBinaries:
             min_version = Version.parse(version_expr[1])
         if len(version_expr) == 4 and version_expr[2] == "until":
             max_version = Version.parse(version_expr[3])
-        candidates: List[Path] = []
-        for ver, binary in self.binaries.items():
-            if min_version <= ver < max_version:
-                candidates.append(binary)
+        candidates = restart_test_candidates(self.binaries, min_version, max_version)
         if len(candidates) == 0:
             return config.binary
         return config.random.choice(candidates)

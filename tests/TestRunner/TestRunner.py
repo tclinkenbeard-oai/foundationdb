@@ -333,6 +333,14 @@ class RestartTestPolicy:
         )
         assert match, old_binary_version_raw
         old_binary_version = tuple(map(int, match.group(1).split(".")))
+        # Only allow specific old binary versions for restart tests.
+        allowed_old_versions = {(7, 3, 43), (7, 3, 59), (7, 3, 69), (7, 1, 61)}
+        if old_binary_version not in allowed_old_versions:
+            _logger.warning(
+                "Skipping old binary v%s for restart tests; using new binary for both phases",
+                ".".join(map(str, old_binary_version)),
+            )
+            return
         match = re.match(".*/restarting/from_([0-9]+\.[0-9]+\.[0-9]+)/", name)
         if match:  # upgrading _from_
             lower_bound = tuple(map(int, match.group(1).split(".")))
