@@ -3,7 +3,7 @@ set -euo pipefail
 
 dest_root="https://appliedciblobdata.blob.core.windows.net/fdb-ci-artifacts"
 readonly default_joshua_proxy_addr="joshua-proxy-joshua-proxy.gateway.turtle-0s.internal.api.openai.org:443"
-readonly default_joshua_runs="1000"
+readonly default_joshua_runs="10000"
 readonly default_joshua_smoke_timeout_seconds="10"
 readonly default_cache_scope="global"
 readonly default_cache_namespace="foundationdb"
