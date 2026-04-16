@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package openai.fdbci.joshua_proxy.v1;
+
+// JoshuaProxy exposes Joshua job submission and status lookup APIs.
+service JoshuaProxy {
+  // Submits a Joshua correctness job and returns a job ID for tracking.
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobReply);
+  // Returns the current status of a previously submitted job.
+  rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusReply);
+}
+
+// Request payload for SubmitJob.
+message SubmitJobRequest {
+  // Location of the correctness package to run.
+  string correctness_package_url = 1;
+  // Number of runs to execute.
+  uint64 runs = 2;
+}
+
+// Response payload for SubmitJob.
+message SubmitJobReply {
+  // Job ID assigned by Joshua.
+  string job_id = 1;
+}
+
+// Request payload for GetJobStatus.
+message GetJobStatusRequest {
+  // Job ID returned from SubmitJob.
+  string job_id = 1;
+}
+
+// Response payload for GetJobStatus.
+message GetJobStatusReply {
+  // Joshua job identifier.
+  string joshua_job_id = 1;
+  // Current job status.
+  oneof status {
+    Success success = 2;
+    Cancelled cancelled = 3;
+    Running running = 4;
+    Failed failed = 5;
+  }
+}
+
+// Job status indicating all requested tests completed successfully.
+message Success {
+  // Count of passing tests.
+  uint64 tests_passed = 1;
+}
+
+// Job status indicating the job was cancelled.
+message Cancelled {
+  // Count of passing tests.
+  uint64 tests_passed = 1;
+  // Count of tests not yet executed.
+  uint64 tests_remaining = 2;
+}
+
+// Job status indicating the job is still running.
+message Running {
+  // Count of passing tests.
+  uint64 tests_passed = 1;
+  // Count of tests not yet executed.
+  uint64 tests_remaining = 2;
+}
+
+// Job status indicating the job failed.
+message Failed {
+  // Count of passing tests.
+  uint64 tests_passed = 1;
+  // Details about failed tests.
+  repeated TestFailure failures = 2;
+}
+
+// Details for an individual test failure.
+message TestFailure {
+  // Name of the failing test.
+  string test_name = 1;
+  // Seed used for the failing test.
+  uint64 seed = 2;
+}
