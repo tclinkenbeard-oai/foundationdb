@@ -1209,8 +1209,11 @@ void Ratekeeper::updateRate(RatekeeperLimits* limits) {
 		Version minLimitingSSVer = std::numeric_limits<Version>::max();
 		for (const auto& it : storageQueueInfo) {
 			auto& ss = it.value;
-			if (!ss.valid || (remoteDC.present() && ss.locality.dcId() == remoteDC))
+			// Keep version-lag based throttling consistent with queue/durability lag calculations:
+			// ignore storage servers until they are accepting requests.
+			if (!ss.valid || !ss.acceptingRequests || (remoteDC.present() && ss.locality.dcId() == remoteDC)) {
 				continue;
+			}
 
 			minSSVer = std::min(minSSVer, ss.lastReply.version);
 
