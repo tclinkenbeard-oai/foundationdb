@@ -2,6 +2,7 @@
 set -euo pipefail
 
 dest_root="https://appliedciblobdata.blob.core.windows.net/fdb-ci-artifacts"
+release_dest_root="https://appliedciblobdata.blob.core.windows.net/fdb-release-artifacts"
 readonly default_joshua_proxy_addr="joshua-proxy-joshua-proxy.gateway.turtle-0s.internal.api.openai.org:443"
 readonly default_joshua_runs="10000"
 readonly default_joshua_smoke_timeout_seconds="10"
@@ -110,6 +111,40 @@ save_buildx_cache() {
   python3 building/scripts/save_buildx_cache.py \
     --cache-file "${cache_file}" \
     --cache-dest "${cache_dest}"
+}
+
+upload_release_binaries() {
+  local release_version="${FDB_RELEASE_BLOB_VERSION:-}"
+  local release_arch
+  local release_dest
+  local binary_dir="build_output/packages/bin"
+  local binaries=(fdbserver fdbcli fdbmonitor)
+  local binary
+
+  if [[ -z "${release_version}" ]]; then
+    echo "FDB_RELEASE_BLOB_VERSION not set; skipping release binary upload"
+    return 0
+  fi
+
+  release_version="$(sanitize_path_component "${release_version}")"
+  release_arch="$(sanitize_path_component "${FDB_RELEASE_BLOB_ARCH:-$(uname -m)}")"
+  release_dest="${release_dest_root}/${release_version}/${release_arch}"
+
+  for binary in "${binaries[@]}"; do
+    if [[ ! -f "${binary_dir}/${binary}" ]]; then
+      echo "Missing release binary ${binary_dir}/${binary}" >&2
+      return 1
+    fi
+  done
+
+  echo "--- Uploading release binaries"
+  echo "~~~ Upload destination"
+  echo "Uploading release binaries to ${release_dest}"
+  (
+    cd "${binary_dir}"
+    BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${release_dest}" \
+      buildkite-agent artifact upload "${binaries[@]}"
+  )
 }
 
 collect_changed_cpp_header_files() {
@@ -228,6 +263,7 @@ docker buildx build \
   --output type=local,dest=build_output \
   -f building/docker/Dockerfile .
 save_buildx_cache
+upload_release_binaries
 
 tarball_dir="build_output/packages"
 shopt -s nullglob
