@@ -1154,10 +1154,11 @@ void ServerKnobs::initialize(Randomize randomize, ClientKnobs* clientKnobs, IsSi
 
 	// Test harness
 	init( WORKER_POLL_DELAY,                                     1.0 );
-	init( PROBABILITY_FACTOR_SHARDED_ROCKSDB_ENGINE_SELECTED_SIM, 100 ); // default is 1
-	init( PROBABILITY_FACTOR_ROCKSDB_ENGINE_SELECTED_SIM,         100 ); // default is 1
-	init( PROBABILITY_FACTOR_SQLITE_ENGINE_SELECTED_SIM,          100 ); // default is 1
-	init( PROBABILITY_FACTOR_MEMORY_SELECTED_SIM,                  40 ); // default is 1
+	init( PROBABILITY_FACTOR_SHARDED_ROCKSDB_ENGINE_SELECTED_SIM,  1 );
+	init( PROBABILITY_FACTOR_REDWOOD_ENGINE_SELECTED_SIM,         15 );
+	init( PROBABILITY_FACTOR_ROCKSDB_ENGINE_SELECTED_SIM,          1 );
+	init( PROBABILITY_FACTOR_SQLITE_ENGINE_SELECTED_SIM,           1 );
+	init( PROBABILITY_FACTOR_MEMORY_SELECTED_SIM,                  1 );
 
 	// Coordination
 	init( COORDINATED_STATE_ONCONFLICT_POLL_INTERVAL,            1.0 ); if( randomize && BUGGIFY ) COORDINATED_STATE_ONCONFLICT_POLL_INTERVAL = 10.0;

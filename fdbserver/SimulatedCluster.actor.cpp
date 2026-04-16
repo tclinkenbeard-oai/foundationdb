@@ -1889,6 +1889,11 @@ SimulationStorageEngine chooseSimulationStorageEngine(const TestConfig& testConf
 				// Adjust the chance that Memory is selected
 				storageEngineCandidates.insert(
 				    storageEngineCandidates.end(), SERVER_KNOBS->PROBABILITY_FACTOR_MEMORY_SELECTED_SIM, storageEngine);
+			} else if (storageEngine == SimulationStorageEngine::REDWOOD) {
+				// Adjust the chance that Redwood is selected
+				storageEngineCandidates.insert(storageEngineCandidates.end(),
+				                               SERVER_KNOBS->PROBABILITY_FACTOR_REDWOOD_ENGINE_SELECTED_SIM,
+				                               storageEngine);
 			} else if (storageEngine == SimulationStorageEngine::SHARDED_ROCKSDB) {
 				// Adjust the chance that ShardedRocksDB is selected
 				storageEngineCandidates.insert(storageEngineCandidates.end(),
