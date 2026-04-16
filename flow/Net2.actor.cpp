@@ -414,11 +414,11 @@ public:
 
 	void close() override { closeSocket(); }
 
-	explicit Connection(boost::asio::io_service& io_service)
+	explicit Connection(boost::asio::io_context& io_service)
 	  : id(nondeterministicRandom()->randomUniqueID()), socket(io_service) {}
 
 	// This is not part of the IConnection interface, because it is wrapped by INetwork::connect()
-	ACTOR static Future<Reference<IConnection>> connect(boost::asio::io_service* ios, NetworkAddress addr) {
+	ACTOR static Future<Reference<IConnection>> connect(boost::asio::io_context* ios, NetworkAddress addr) {
 		state Reference<Connection> self(new Connection(*ios));
 
 		self->peer_address = addr;
@@ -472,7 +472,7 @@ public:
 		boost::system::error_code err;
 		++g_net2->countReads;
 		size_t toRead = end - begin;
-		size_t size = socket.read_some(boost::asio::mutable_buffers_1(begin, toRead), err);
+		size_t size = socket.read_some(boost::asio::buffer(begin, toRead), err);
 		g_net2->bytesReceived += size;
 		//TraceEvent("ConnRead", this->id).detail("Bytes", size);
 		if (err) {
@@ -621,7 +621,7 @@ class UDPSocket : public IUDPSocket, ReferenceCounted<UDPSocket> {
 	bool isPublic = false;
 
 public:
-	ACTOR static Future<Reference<IUDPSocket>> connect(boost::asio::io_service* io_service,
+	ACTOR static Future<Reference<IUDPSocket>> connect(boost::asio::io_context* io_service,
 	                                                   Optional<NetworkAddress> toAddress,
 	                                                   bool isV6) {
 		state Reference<UDPSocket> self(new UDPSocket(*io_service, toAddress, isV6));
@@ -727,7 +727,7 @@ public:
 	boost::asio::ip::udp::socket::native_handle_type native_handle() override { return socket.native_handle(); }
 
 private:
-	UDPSocket(boost::asio::io_service& io_service, Optional<NetworkAddress> toAddress, bool isV6)
+	UDPSocket(boost::asio::io_context& io_service, Optional<NetworkAddress> toAddress, bool isV6)
 	  : id(nondeterministicRandom()->randomUniqueID()), socket(io_service, isV6 ? udp::v6() : udp::v4()) {}
 
 	void closeSocket() {
@@ -797,7 +797,7 @@ private:
 			self->acceptor.async_accept(conn->getSocket(), peer_endpoint, std::move(p));
 			wait(f);
 			auto peer_address = peer_endpoint.address().is_v6() ? IPAddress(peer_endpoint.address().to_v6().to_bytes())
-			                                                    : IPAddress(peer_endpoint.address().to_v4().to_ulong());
+			                                                    : IPAddress(peer_endpoint.address().to_v4().to_uint());
 			conn->accept(NetworkAddress(peer_address, peer_endpoint.port()));
 
 			return conn;
@@ -873,7 +873,7 @@ public:
 
 	void close() override { closeSocket(); }
 
-	explicit SSLConnection(boost::asio::io_service& io_service,
+	explicit SSLConnection(boost::asio::io_context& io_service,
 	                       Reference<ReferencedObject<boost::asio::ssl::context>> context)
 	  : id(nondeterministicRandom()->randomUniqueID()), socket(io_service), ssl_sock(socket, context->mutate()),
 	    sslContext(context), has_trusted_peer(false) {}
@@ -883,7 +883,7 @@ public:
 	    ssl_sock(socket, context->mutate()), sslContext(context) {}
 
 	// This is not part of the IConnection interface, because it is wrapped by INetwork::connect()
-	ACTOR static Future<Reference<IConnection>> connect(boost::asio::io_service* ios,
+	ACTOR static Future<Reference<IConnection>> connect(boost::asio::io_context* ios,
 	                                                    Reference<ReferencedObject<boost::asio::ssl::context>> context,
 	                                                    NetworkAddress addr,
 	                                                    tcp::socket* existingSocket = nullptr) {
@@ -1107,7 +1107,7 @@ public:
 		boost::system::error_code err;
 		++g_net2->countReads;
 		size_t toRead = end - begin;
-		size_t size = ssl_sock.read_some(boost::asio::mutable_buffers_1(begin, toRead), err);
+		size_t size = ssl_sock.read_some(boost::asio::buffer(begin, toRead), err);
 		g_net2->bytesReceived += size;
 		//TraceEvent("ConnRead", this->id).detail("Bytes", size);
 		if (err) {
@@ -1259,7 +1259,7 @@ private:
 			self->acceptor.async_accept(conn->getSocket(), peer_endpoint, std::move(p));
 			wait(f);
 			auto peer_address = peer_endpoint.address().is_v6() ? IPAddress(peer_endpoint.address().to_v6().to_bytes())
-			                                                    : IPAddress(peer_endpoint.address().to_v4().to_ulong());
+			                                                    : IPAddress(peer_endpoint.address().to_v4().to_uint());
 
 			conn->accept(NetworkAddress(peer_address, peer_endpoint.port(), false, true));
 
@@ -1872,28 +1872,25 @@ ACTOR static Future<std::vector<NetworkAddress>> resolveTCPEndpoint_impl(Net2* s
 	state Future<std::vector<NetworkAddress>> result = promise.getFuture();
 
 	tcpResolver.async_resolve(
-	    host, service, [promise](const boost::system::error_code& ec, tcp::resolver::iterator iter) {
+	    host, service, [promise](const boost::system::error_code& ec, tcp::resolver::results_type results) {
 		    if (ec) {
 			    promise.sendError(lookup_failed());
 			    return;
 		    }
 
 		    std::vector<NetworkAddress> addrs;
-
-		    tcp::resolver::iterator end;
-		    while (iter != end) {
-			    auto endpoint = iter->endpoint();
-			    auto addr = endpoint.address();
+		    for (const auto& entry : results) {
+					auto endpoint = entry.endpoint();
+					auto addr = endpoint.address();
 			    if (addr.is_v6()) {
 				    // IPV6 loopback might not be supported, only return IPV6 address
 				    if (!addr.is_loopback()) {
 					    addrs.emplace_back(IPAddress(addr.to_v6().to_bytes()), endpoint.port());
 				    }
 			    } else {
-				    addrs.emplace_back(addr.to_v4().to_ulong(), endpoint.port());
+				    addrs.emplace_back(addr.to_v4().to_uint(), endpoint.port());
 			    }
-			    ++iter;
-		    }
+				}
 
 		    if (addrs.empty()) {
 			    promise.sendError(lookup_failed());
@@ -1935,18 +1932,16 @@ Future<std::vector<NetworkAddress>> Net2::resolveTCPEndpointWithDNSCache(const s
 std::vector<NetworkAddress> Net2::resolveTCPEndpointBlocking(const std::string& host, const std::string& service) {
 	tcp::resolver tcpResolver(reactor.ios);
 	try {
-		auto iter = tcpResolver.resolve(host, service);
-		decltype(iter) end;
+		auto results = tcpResolver.resolve(host, service);
 		std::vector<NetworkAddress> addrs;
-		while (iter != end) {
-			auto endpoint = iter->endpoint();
+		for (const auto& entry : results) {
+			auto endpoint = entry.endpoint();
 			auto addr = endpoint.address();
 			if (addr.is_v6()) {
 				addrs.emplace_back(IPAddress(addr.to_v6().to_bytes()), endpoint.port());
 			} else {
-				addrs.emplace_back(addr.to_v4().to_ulong(), endpoint.port());
+				addrs.emplace_back(addr.to_v4().to_uint(), endpoint.port());
 			}
-			++iter;
 		}
 		if (addrs.empty()) {
 			throw lookup_failed();
@@ -1978,12 +1973,12 @@ bool Net2::isAddressOnThisHost(NetworkAddress const& addr) const {
 		addressOnHostCache.clear(); // Bound cache memory; should not really happen
 
 	try {
-		boost::asio::io_service ioService;
+		boost::asio::io_context ioService;
 		boost::asio::ip::udp::socket socket(ioService);
 		boost::asio::ip::udp::endpoint endpoint(tcpAddress(addr.ip), 1);
 		socket.connect(endpoint);
 		bool local = addr.ip.isV6() ? socket.local_endpoint().address().to_v6().to_bytes() == addr.ip.toV6()
-		                            : socket.local_endpoint().address().to_v4().to_ulong() == addr.ip.toV4();
+		                            : socket.local_endpoint().address().to_v4().to_uint() == addr.ip.toV4();
 		socket.close();
 		if (local)
 			TraceEvent(SevInfo, "AddressIsOnHost").detail("Address", addr);
@@ -2038,7 +2033,7 @@ void Net2::getDiskBytes(std::string const& directory, int64_t& free, int64_t& to
 #include <sched.h>
 #endif
 
-ASIOReactor::ASIOReactor(Net2* net) : do_not_stop(ios), network(net), firstTimer(ios) {
+ASIOReactor::ASIOReactor(Net2* net) : do_not_stop(boost::asio::make_work_guard(ios)), network(net), firstTimer(ios) {
 #ifdef __linux__
 	// Reactor flags are used only for experimentation, and are platform-specific
 	if (FLOW_KNOBS->REACTOR_FLAGS & 1) {
@@ -2093,7 +2088,7 @@ void ASIOReactor::react() {
 }
 
 void ASIOReactor::wake() {
-	ios.post(nullCompletionHandler);
+	 boost::asio::post(ios, nullCompletionHandler);
 }
 
 } // namespace N2

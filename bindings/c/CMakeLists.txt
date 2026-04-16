@@ -56,6 +56,7 @@ else()
   add_library(fdb_c SHARED ${FDB_C_SRCS} ${fdb_c_apiversion_file} ${asm_file})
   strip_debug_symbols(fdb_c)
 endif()
+
 add_dependencies(fdb_c fdb_c_generated fdb_c_options)
 add_dependencies(fdbclient fdb_c_options)
 add_dependencies(fdbclient_sampling fdb_c_options)

@@ -4,6 +4,18 @@ option(FLOW_USE_ZSTD "Enable zstd compression in flow" OFF)
 
 fdb_find_sources(FLOW_SRCS)
 
+# On a mac boost is bringing zstd so let's find it so that things still compile.
+if(APPLE)
+  find_package(zstd CONFIG REQUIRED)
+
+  # Boost::iostreams adds "zstd" as a raw link item.
+  # Provide an IMPORTED target named "zstd" so it doesn't become "-lzstd".
+  if(NOT TARGET zstd)
+    add_library(zstd INTERFACE)
+    target_link_libraries(zstd INTERFACE zstd::libzstd_static)
+  endif()
+endif()
+
 if (FLOW_USE_ZSTD)
   # NOTE: To enable boost::iostreams with zstd library support, manually add
   # zstd.cpp to source files is required. Ref:
@@ -268,4 +280,3 @@ if (WITH_SWIFT)
     add_dependencies(flow flow_swift)
     add_dependencies(flow_sampling flow_swift)
 endif() # WITH SWIFT
-

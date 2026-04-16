@@ -130,8 +130,12 @@ std::string IPAddress::toString() const {
 
 Optional<IPAddress> IPAddress::parse(std::string const& str) {
 	try {
-		auto addr = boost::asio::ip::address::from_string(str);
-		return addr.is_v6() ? IPAddress(addr.to_v6().to_bytes()) : IPAddress(addr.to_v4().to_ulong());
+		boost::system::error_code ec;
+		auto addr = boost::asio::ip::make_address(str, ec);
+		if (ec) {
+			return Optional<IPAddress>();
+		}
+		return addr.is_v6() ? IPAddress(addr.to_v6().to_bytes()) : IPAddress(addr.to_v4().to_uint());
 	} catch (...) {
 		return Optional<IPAddress>();
 	}

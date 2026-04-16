@@ -41,7 +41,7 @@
 
 using namespace boost::asio;
 
-static io_service ios;
+static io_context ios;
 
 class SimExternalConnectionImpl {
 public:
@@ -111,7 +111,7 @@ int SimExternalConnection::write(SendBuffer const* buffer, int limit) {
 	const auto bytesReadable = socket.available();
 	std::vector<uint8_t> tempReadBuffer(bytesReadable);
 	for (int index = 0; index < bytesReadable;) {
-		index += socket.read_some(mutable_buffers_1(&tempReadBuffer[index], bytesReadable), err);
+		index += socket.read_some(boost::asio::buffer(&tempReadBuffer[index], bytesReadable), err);
 	}
 	std::copy(tempReadBuffer.begin(), tempReadBuffer.end(), std::inserter(readBuffer, readBuffer.end()));
 	ASSERT(!err);
@@ -128,7 +128,7 @@ NetworkAddress SimExternalConnection::getPeerAddress() const {
 	if (addr.is_v6()) {
 		return NetworkAddress(IPAddress(addr.to_v6().to_bytes()), endpoint.port());
 	} else {
-		return NetworkAddress(addr.to_v4().to_ulong(), endpoint.port());
+		return NetworkAddress(addr.to_v4().to_uint(), endpoint.port());
 	}
 }
 
@@ -145,20 +145,18 @@ std::vector<NetworkAddress> SimExternalConnection::resolveTCPEndpointBlocking(co
                                                                               DNSCache* dnsCache) {
 	ip::tcp::resolver resolver(ios);
 	try {
-		auto iter = resolver.resolve(host, service);
-		decltype(iter) end;
+		auto results = resolver.resolve(host, service);
 		std::vector<NetworkAddress> addrs;
-		while (iter != end) {
-			auto endpoint = iter->endpoint();
+		for (const auto& entry : results) {
+			auto endpoint = entry.endpoint();
 			auto addr = endpoint.address();
 			// register the endpoint as public so that if it does happen to be an fdb process, we can connect to it
 			// successfully
 			if (addr.is_v6()) {
 				addrs.emplace_back(IPAddress(addr.to_v6().to_bytes()), endpoint.port(), true, false);
 			} else {
-				addrs.emplace_back(addr.to_v4().to_ulong(), endpoint.port(), true, false);
+				addrs.emplace_back(addr.to_v4().to_uint(), endpoint.port(), true, false);
 			}
-			++iter;
 		}
 		if (addrs.empty()) {
 			throw lookup_failed();
@@ -195,14 +193,14 @@ static constexpr auto testEchoServerPort = 8000;
 
 static void testEchoServer() {
 	static constexpr auto readBufferSize = 1000;
-	io_service ios;
+	io_context ios;
 	ip::tcp::acceptor acceptor(ios, ip::tcp::endpoint(ip::tcp::v4(), testEchoServerPort));
 	ip::tcp::socket socket(ios);
 	acceptor.accept(socket);
 	loop {
 		char readBuffer[readBufferSize];
 		boost::system::error_code err;
-		auto length = socket.read_some(mutable_buffers_1(readBuffer, readBufferSize), err);
+		auto length = socket.read_some(boost::asio::buffer(readBuffer, readBufferSize), err);
 		if (err == boost::asio::error::eof) {
 			return;
 		}

@@ -20,7 +20,7 @@
 
 #include "fdbrpc/Net2FileSystem.h"
 
-// Define boost::asio::io_service
+// Define boost::asio::io_context
 #include <algorithm>
 #ifndef BOOST_SYSTEM_NO_LIB
 #define BOOST_SYSTEM_NO_LIB
@@ -80,7 +80,7 @@ Future<Reference<class IAsyncFile>> Net2FileSystem::open(const std::string& file
 		    filename,
 		    flags,
 		    mode,
-		    static_cast<boost::asio::io_service*>((void*)g_network->global(INetwork::enASIOService)));
+		    static_cast<boost::asio::io_context*>((void*)g_network->global(INetwork::enASIOService)));
 	if (FLOW_KNOBS->PAGE_WRITE_CHECKSUM_HISTORY > 0)
 		f = map(f, [=](Reference<IAsyncFile> r) { return Reference<IAsyncFile>(new AsyncFileWriteChecker(r)); });
 	if (FLOW_KNOBS->ENABLE_CHAOS_FEATURES)
