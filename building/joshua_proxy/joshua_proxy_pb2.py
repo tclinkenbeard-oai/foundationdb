@@ -8,6 +8,19 @@ from google.protobuf import descriptor as _descriptor
 from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import symbol_database as _symbol_database
 from google.protobuf.internal import builder as _builder
+try:
+  from google.protobuf import runtime_version as _runtime_version
+except ImportError:
+  _runtime_version = None
+if _runtime_version is not None:
+  _runtime_version.ValidateProtobufRuntimeVersion(
+      _runtime_version.Domain.PUBLIC,
+      5,
+      29,
+      0,
+      '',
+      'joshua_proxy.proto'
+  )
 # @@protoc_insertion_point(imports)
 
 _sym_db = _symbol_database.Default()
@@ -15,7 +28,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12joshua_proxy.proto\x12\x1copenai.fdbci.joshua_proxy.v1\"A\n\x10SubmitJobRequest\x12\x1f\n\x17\x63orrectness_package_url\x18\x01 \x01(\t\x12\x0c\n\x04runs\x18\x02 \x01(\x04\" \n\x0eSubmitJobReply\x12\x0e\n\x06job_id\x18\x01 \x01(\t\"%\n\x13GetJobStatusRequest\x12\x0e\n\x06job_id\x18\x01 \x01(\t\"\x9e\x02\n\x11GetJobStatusReply\x12\x15\n\rjoshua_job_id\x18\x01 \x01(\t\x12\x38\n\x07success\x18\x02 \x01(\x0b\x32%.openai.fdbci.joshua_proxy.v1.SuccessH\x00\x12<\n\tcancelled\x18\x03 \x01(\x0b\x32\'.openai.fdbci.joshua_proxy.v1.CancelledH\x00\x12\x38\n\x07running\x18\x04 \x01(\x0b\x32%.openai.fdbci.joshua_proxy.v1.RunningH\x00\x12\x36\n\x06\x66\x61iled\x18\x05 \x01(\x0b\x32$.openai.fdbci.joshua_proxy.v1.FailedH\x00\x42\x08\n\x06status\"\x1f\n\x07Success\x12\x14\n\x0ctests_passed\x18\x01 \x01(\x04\":\n\tCancelled\x12\x14\n\x0ctests_passed\x18\x01 \x01(\x04\x12\x17\n\x0ftests_remaining\x18\x02 \x01(\x04\"8\n\x07Running\x12\x14\n\x0ctests_passed\x18\x01 \x01(\x04\x12\x17\n\x0ftests_remaining\x18\x02 \x01(\x04\"[\n\x06\x46\x61iled\x12\x14\n\x0ctests_passed\x18\x01 \x01(\x04\x12;\n\x08\x66\x61ilures\x18\x02 \x03(\x0b\x32).openai.fdbci.joshua_proxy.v1.TestFailure\".\n\x0bTestFailure\x12\x11\n\ttest_name\x18\x01 \x01(\t\x12\x0c\n\x04seed\x18\x02 \x01(\x04\x32\xec\x01\n\x0bJoshuaProxy\x12i\n\tSubmitJob\x12..openai.fdbci.joshua_proxy.v1.SubmitJobRequest\x1a,.openai.fdbci.joshua_proxy.v1.SubmitJobReply\x12r\n\x0cGetJobStatus\x12\x31.openai.fdbci.joshua_proxy.v1.GetJobStatusRequest\x1a/.openai.fdbci.joshua_proxy.v1.GetJobStatusReplyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12joshua_proxy.proto\x12\x1copenai.fdbci.joshua_proxy.v1\"k\n\x10SubmitJobRequest\x12\x1f\n\x17\x63orrectness_package_url\x18\x01 \x01(\t\x12\x0c\n\x04runs\x18\x02 \x01(\x04\x12\x13\n\x0b\x63ommit_hash\x18\x03 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x04 \x01(\t\" \n\x0eSubmitJobReply\x12\x0e\n\x06job_id\x18\x01 \x01(\t\"%\n\x13GetJobStatusRequest\x12\x0e\n\x06job_id\x18\x01 \x01(\t\"\xb7\x03\n\x11GetJobStatusReply\x12\x15\n\rjoshua_job_id\x18\x01 \x01(\t\x12I\n\x12test_runtime_stats\x18\x06 \x03(\x0b\x32-.openai.fdbci.joshua_proxy.v1.TestRuntimeStat\x12\x13\n\x0b\x63ommit_hash\x18\x07 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x08 \x01(\t\x12\x11\n\tsubmitted\x18\t \x01(\t\x12\x0f\n\x07stopped\x18\n \x01(\t\x12\x38\n\x07success\x18\x02 \x01(\x0b\x32%.openai.fdbci.joshua_proxy.v1.SuccessH\x00\x12<\n\tcancelled\x18\x03 \x01(\x0b\x32\'.openai.fdbci.joshua_proxy.v1.CancelledH\x00\x12\x38\n\x07running\x18\x04 \x01(\x0b\x32%.openai.fdbci.joshua_proxy.v1.RunningH\x00\x12\x36\n\x06\x66\x61iled\x18\x05 \x01(\x0b\x32$.openai.fdbci.joshua_proxy.v1.FailedH\x00\x42\x08\n\x06status\"\xbf\x01\n\x14ListEnsemblesRequest\x12I\n\x04mode\x18\x01 \x01(\x0e\x32;.openai.fdbci.joshua_proxy.v1.ListEnsemblesRequest.ListMode\x12\"\n\x1ainclude_test_runtime_stats\x18\x02 \x01(\x08\"8\n\x08ListMode\x12\x15\n\x11LIST_MODE_RUNNING\x10\x00\x12\x15\n\x11LIST_MODE_STOPPED\x10\x01\"K\n\x12ListEnsemblesReply\x12\x35\n\x04jobs\x18\x01 \x03(\x0b\x32\'.openai.fdbci.joshua_proxy.v1.JobStatus\"\xbf\x03\n\tJobStatus\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12\x15\n\rjoshua_job_id\x18\x02 \x01(\t\x12I\n\x12test_runtime_stats\x18\x07 \x03(\x0b\x32-.openai.fdbci.joshua_proxy.v1.TestRuntimeStat\x12\x13\n\x0b\x63ommit_hash\x18\x08 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\t \x01(\t\x12\x11\n\tsubmitted\x18\n \x01(\t\x12\x0f\n\x07stopped\x18\x0b \x01(\t\x12\x38\n\x07success\x18\x03 \x01(\x0b\x32%.openai.fdbci.joshua_proxy.v1.SuccessH\x00\x12<\n\tcancelled\x18\x04 \x01(\x0b\x32\'.openai.fdbci.joshua_proxy.v1.CancelledH\x00\x12\x38\n\x07running\x18\x05 \x01(\x0b\x32%.openai.fdbci.joshua_proxy.v1.RunningH\x00\x12\x36\n\x06\x66\x61iled\x18\x06 \x01(\x0b\x32$.openai.fdbci.joshua_proxy.v1.FailedH\x00\x42\x08\n\x06status\"N\n\x0fTestRuntimeStat\x12\x11\n\ttest_name\x18\x01 \x01(\t\x12\x11\n\trun_count\x18\x02 \x01(\x04\x12\x15\n\rtotal_runtime\x18\x03 \x01(\x04\"\x1f\n\x07Success\x12\x14\n\x0ctests_passed\x18\x01 \x01(\x04\":\n\tCancelled\x12\x14\n\x0ctests_passed\x18\x01 \x01(\x04\x12\x17\n\x0ftests_remaining\x18\x02 \x01(\x04\"8\n\x07Running\x12\x14\n\x0ctests_passed\x18\x01 \x01(\x04\x12\x17\n\x0ftests_remaining\x18\x02 \x01(\x04\"q\n\x06\x46\x61iled\x12\x14\n\x0ctests_passed\x18\x01 \x01(\x04\x12;\n\x08\x66\x61ilures\x18\x02 \x03(\x0b\x32).openai.fdbci.joshua_proxy.v1.TestFailure\x12\x14\n\x0ctests_failed\x18\x03 \x01(\x04\"`\n\x0bTestFailure\x12\x11\n\ttest_name\x18\x01 \x01(\t\x12\x0c\n\x04seed\x18\x02 \x01(\x04\x12\x1c\n\x0f\x62uggify_enabled\x18\x03 \x01(\x08H\x00\x88\x01\x01\x42\x12\n\x10_buggify_enabled2\xe3\x02\n\x0bJoshuaProxy\x12i\n\tSubmitJob\x12..openai.fdbci.joshua_proxy.v1.SubmitJobRequest\x1a,.openai.fdbci.joshua_proxy.v1.SubmitJobReply\x12r\n\x0cGetJobStatus\x12\x31.openai.fdbci.joshua_proxy.v1.GetJobStatusRequest\x1a/.openai.fdbci.joshua_proxy.v1.GetJobStatusReply\x12u\n\rListEnsembles\x12\x32.openai.fdbci.joshua_proxy.v1.ListEnsemblesRequest\x1a\x30.openai.fdbci.joshua_proxy.v1.ListEnsemblesReplyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -23,23 +36,33 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'joshua_proxy_pb2', _globals
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_SUBMITJOBREQUEST']._serialized_start=52
-  _globals['_SUBMITJOBREQUEST']._serialized_end=117
-  _globals['_SUBMITJOBREPLY']._serialized_start=119
-  _globals['_SUBMITJOBREPLY']._serialized_end=151
-  _globals['_GETJOBSTATUSREQUEST']._serialized_start=153
-  _globals['_GETJOBSTATUSREQUEST']._serialized_end=190
-  _globals['_GETJOBSTATUSREPLY']._serialized_start=193
-  _globals['_GETJOBSTATUSREPLY']._serialized_end=479
-  _globals['_SUCCESS']._serialized_start=481
-  _globals['_SUCCESS']._serialized_end=512
-  _globals['_CANCELLED']._serialized_start=514
-  _globals['_CANCELLED']._serialized_end=572
-  _globals['_RUNNING']._serialized_start=574
-  _globals['_RUNNING']._serialized_end=630
-  _globals['_FAILED']._serialized_start=632
-  _globals['_FAILED']._serialized_end=723
-  _globals['_TESTFAILURE']._serialized_start=725
-  _globals['_TESTFAILURE']._serialized_end=771
-  _globals['_JOSHUAPROXY']._serialized_start=774
-  _globals['_JOSHUAPROXY']._serialized_end=1010
+  _globals['_SUBMITJOBREQUEST']._serialized_end=159
+  _globals['_SUBMITJOBREPLY']._serialized_start=161
+  _globals['_SUBMITJOBREPLY']._serialized_end=193
+  _globals['_GETJOBSTATUSREQUEST']._serialized_start=195
+  _globals['_GETJOBSTATUSREQUEST']._serialized_end=232
+  _globals['_GETJOBSTATUSREPLY']._serialized_start=235
+  _globals['_GETJOBSTATUSREPLY']._serialized_end=674
+  _globals['_LISTENSEMBLESREQUEST']._serialized_start=677
+  _globals['_LISTENSEMBLESREQUEST']._serialized_end=868
+  _globals['_LISTENSEMBLESREQUEST_LISTMODE']._serialized_start=812
+  _globals['_LISTENSEMBLESREQUEST_LISTMODE']._serialized_end=868
+  _globals['_LISTENSEMBLESREPLY']._serialized_start=870
+  _globals['_LISTENSEMBLESREPLY']._serialized_end=945
+  _globals['_JOBSTATUS']._serialized_start=948
+  _globals['_JOBSTATUS']._serialized_end=1395
+  _globals['_TESTRUNTIMESTAT']._serialized_start=1397
+  _globals['_TESTRUNTIMESTAT']._serialized_end=1475
+  _globals['_SUCCESS']._serialized_start=1477
+  _globals['_SUCCESS']._serialized_end=1508
+  _globals['_CANCELLED']._serialized_start=1510
+  _globals['_CANCELLED']._serialized_end=1568
+  _globals['_RUNNING']._serialized_start=1570
+  _globals['_RUNNING']._serialized_end=1626
+  _globals['_FAILED']._serialized_start=1628
+  _globals['_FAILED']._serialized_end=1741
+  _globals['_TESTFAILURE']._serialized_start=1743
+  _globals['_TESTFAILURE']._serialized_end=1839
+  _globals['_JOSHUAPROXY']._serialized_start=1842
+  _globals['_JOSHUAPROXY']._serialized_end=2197
 # @@protoc_insertion_point(module_scope)

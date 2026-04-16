@@ -84,11 +84,15 @@ class _JoshuaProxyClient:
         *,
         correctness_package_url: str,
         runs: int,
+        commit_hash: Optional[str] = None,
+        description: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
     ) -> joshua_proxy_pb2.SubmitJobReply:
         request = joshua_proxy_pb2.SubmitJobRequest(
             correctness_package_url=correctness_package_url,
             runs=runs,
+            commit_hash=commit_hash or "",
+            description=description or "",
         )
         return self._submit_job_rpc(request, timeout=timeout_seconds)
 
@@ -216,6 +220,8 @@ def _run_submit(args: argparse.Namespace) -> int:
             reply = client.submit_job(
                 correctness_package_url=args.correctness_package_url,
                 runs=args.runs,
+                commit_hash=args.commit_hash,
+                description=args.description,
             )
         except grpc.RpcError as exc:
             output = _rpc_error_text(exc)
@@ -254,6 +260,14 @@ def _build_parser() -> argparse.ArgumentParser:
     submit_parser.add_argument("--addr", required=True, help="Joshua Proxy address (host:port or grpc[s]://host:port)")
     submit_parser.add_argument("--correctness-package-url", required=True, help="Blob URL to correctness tarball")
     submit_parser.add_argument("--runs", type=_positive_int, required=True, help="Number of Joshua runs to execute")
+    submit_parser.add_argument(
+        "--commit-hash",
+        help="Optional FoundationDB commit hash to persist on the Joshua ensemble",
+    )
+    submit_parser.add_argument(
+        "--description",
+        help="Optional free-form description to persist on the Joshua ensemble",
+    )
     submit_parser.add_argument("--insecure", action="store_true", help="Disable TLS hostname verification")
     submit_parser.set_defaults(handler=_run_submit)
 

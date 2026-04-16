@@ -259,11 +259,27 @@ if (( ${#tarballs[@]} )); then
   echo "~~~ Submitting Joshua job"
   joshua_proxy_addr="${JOSHUA_PROXY_ADDR:-${default_joshua_proxy_addr}}"
   joshua_runs="${JOSHUA_RUNS:-${default_joshua_runs}}"
+  joshua_commit_hash="${BUILDKITE_COMMIT:-}"
+  joshua_description="${JOSHUA_DESCRIPTION:-}"
+  if [[ -z "${joshua_description}" && -n "${BUILDKITE_PULL_REQUEST:-}" && "${BUILDKITE_PULL_REQUEST}" != "false" ]]; then
+    joshua_description="PR ${BUILDKITE_PULL_REQUEST} CI"
+  fi
+  if [[ -z "${joshua_commit_hash}" ]] && command -v git >/dev/null; then
+    joshua_commit_hash="$(git rev-parse HEAD 2>/dev/null || true)"
+  fi
   if ! [[ "${joshua_runs}" =~ ^[1-9][0-9]*$ ]]; then
     echo "JOSHUA_RUNS must be a positive integer, got: ${joshua_runs}" >&2
     exit 1
   fi
   echo "Submitting tarball URL ${selected_tarball_url} to ${joshua_proxy_addr} with runs=${joshua_runs}"
+  if [[ -n "${joshua_commit_hash}" ]]; then
+    echo "Including commit hash in Joshua submission: ${joshua_commit_hash}"
+  else
+    echo "Commit hash unavailable; submitting Joshua job without commit hash metadata"
+  fi
+  if [[ -n "${joshua_description}" ]]; then
+    echo "Including Joshua submission description metadata"
+  fi
   submit_args=(
     python3 building/joshua_proxy/joshua_proxy_client.py
     submit
@@ -271,6 +287,12 @@ if (( ${#tarballs[@]} )); then
     --correctness-package-url "${selected_tarball_url}"
     --runs "${joshua_runs}"
   )
+  if [[ -n "${joshua_commit_hash}" ]]; then
+    submit_args+=(--commit-hash "${joshua_commit_hash}")
+  fi
+  if [[ -n "${joshua_description}" ]]; then
+    submit_args+=(--description "${joshua_description}")
+  fi
   if [[ "${JOSHUA_PROXY_INSECURE:-}" == "1" ]]; then
     submit_args+=(--insecure)
   fi

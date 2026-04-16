@@ -8,6 +8,8 @@ service JoshuaProxy {
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobReply);
   // Returns the current status of a previously submitted job.
   rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusReply);
+  // Lists Joshua ensembles for a selected listing mode.
+  rpc ListEnsembles(ListEnsemblesRequest) returns (ListEnsemblesReply);
 }
 
 // Request payload for SubmitJob.
@@ -16,6 +18,10 @@ message SubmitJobRequest {
   string correctness_package_url = 1;
   // Number of runs to execute.
   uint64 runs = 2;
+  // Optional FoundationDB commit hash to persist on the Joshua ensemble.
+  string commit_hash = 3;
+  // Optional free-form description to persist on the Joshua ensemble.
+  string description = 4;
 }
 
 // Response payload for SubmitJob.
@@ -34,6 +40,16 @@ message GetJobStatusRequest {
 message GetJobStatusReply {
   // Joshua job identifier.
   string joshua_job_id = 1;
+  // Aggregated per-test runtime statistics emitted by TestHarness2 (when available).
+  repeated TestRuntimeStat test_runtime_stats = 6;
+  // FoundationDB commit hash persisted on the Joshua ensemble (when provided at submit time).
+  string commit_hash = 7;
+  // Free-form description persisted on the Joshua ensemble (when provided at submit time).
+  string description = 8;
+  // Joshua ensemble submission timestamp (UTC), when available.
+  string submitted = 9;
+  // Joshua ensemble stop timestamp (UTC), when available.
+  string stopped = 10;
   // Current job status.
   oneof status {
     Success success = 2;
@@ -41,6 +57,61 @@ message GetJobStatusReply {
     Running running = 4;
     Failed failed = 5;
   }
+}
+
+// Request payload for ListEnsembles.
+message ListEnsemblesRequest {
+  // Which ensembles should be returned by the list call.
+  enum ListMode {
+    LIST_MODE_RUNNING = 0;
+    LIST_MODE_STOPPED = 1;
+  }
+  // Defaults to LIST_MODE_RUNNING when unset.
+  ListMode mode = 1;
+  // When true, include per-test runtime_stats from TestHarness2 application results.
+  // Leave false for a lighter-weight listing response.
+  bool include_test_runtime_stats = 2;
+}
+
+// Response payload for ListEnsembles.
+message ListEnsemblesReply {
+  // Joshua ensembles for the selected list mode.
+  repeated JobStatus jobs = 1;
+}
+
+// Status summary for a Joshua job.
+message JobStatus {
+  // Joshua proxy job identifier.
+  string job_id = 1;
+  // Joshua job identifier.
+  string joshua_job_id = 2;
+  // Aggregated per-test runtime statistics emitted by TestHarness2 (when available).
+  repeated TestRuntimeStat test_runtime_stats = 7;
+  // FoundationDB commit hash persisted on the Joshua ensemble (when provided at submit time).
+  string commit_hash = 8;
+  // Free-form description persisted on the Joshua ensemble (when provided at submit time).
+  string description = 9;
+  // Joshua ensemble submission timestamp (UTC), when available.
+  string submitted = 10;
+  // Joshua ensemble stop timestamp (UTC), when available.
+  string stopped = 11;
+  // Current job status.
+  oneof status {
+    Success success = 3;
+    Cancelled cancelled = 4;
+    Running running = 5;
+    Failed failed = 6;
+  }
+}
+
+// Aggregated runtime statistics for a single test across an ensemble.
+message TestRuntimeStat {
+  // Logical test name (as reported by TestHarness2 runtime_stats).
+  string test_name = 1;
+  // Number of times this test was run in the ensemble.
+  uint64 run_count = 2;
+  // Accumulated runtime for this test across runs.
+  uint64 total_runtime = 3;
 }
 
 // Job status indicating all requested tests completed successfully.
@@ -71,6 +142,8 @@ message Failed {
   uint64 tests_passed = 1;
   // Details about failed tests.
   repeated TestFailure failures = 2;
+  // Count of failed tests.
+  uint64 tests_failed = 3;
 }
 
 // Details for an individual test failure.
@@ -79,4 +152,6 @@ message TestFailure {
   string test_name = 1;
   // Seed used for the failing test.
   uint64 seed = 2;
+  // Whether buggify was enabled for the failing test (when known).
+  optional bool buggify_enabled = 3;
 }
