@@ -207,6 +207,7 @@ public:
 	int BULKLOAD_VERBOSE_LEVEL; // Set to 1 to minimize the verbosity. Set to 5 to turn on all events for performance
 	                            // insights. Set to 10 to turn on all events.
 	int S3CLIENT_VERBOSE_LEVEL; // Similar to BULKLOAD_VERBOSE_LEVEL
+	bool BACKUP_READS_USE_LOW_PRIORITY;
 
 	// Configuration
 	int32_t DEFAULT_AUTO_COMMIT_PROXIES;

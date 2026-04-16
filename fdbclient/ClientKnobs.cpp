@@ -204,6 +204,7 @@ void ClientKnobs::initialize(Randomize randomize) {
 	init( BULKLOAD_JOB_HISTORY_COUNT_MAX,           10 ); if (randomize && BUGGIFY) BULKLOAD_JOB_HISTORY_COUNT_MAX = deterministicRandom()->randomInt(1, 10);
 	init( BULKLOAD_VERBOSE_LEVEL,                   10 );
 	init( S3CLIENT_VERBOSE_LEVEL,                   10 );
+	init( BACKUP_READS_USE_LOW_PRIORITY, false ); if( randomize && BUGGIFY ) { BACKUP_READS_USE_LOW_PRIORITY = deterministicRandom()->random01() < 0.1; }
 
 	// Configuration
 	init( DEFAULT_AUTO_COMMIT_PROXIES,               3 );
