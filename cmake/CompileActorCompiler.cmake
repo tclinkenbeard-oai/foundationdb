@@ -4,7 +4,9 @@ set(ACTORCOMPILER_SRCS
   ${CMAKE_CURRENT_SOURCE_DIR}/flow/actorcompiler/ParseTree.cs
   ${CMAKE_CURRENT_SOURCE_DIR}/flow/actorcompiler/Program.cs
   ${CMAKE_CURRENT_SOURCE_DIR}/flow/actorcompiler/Properties/AssemblyInfo.cs)
-if(WIN32)
+if(USE_PYTHON_AC)
+  set(actor_exe "${CMAKE_CURRENT_SOURCE_DIR}/flow/actorcompiler/actor_compiler.py")
+elseif(WIN32)
   add_executable(actorcompiler ${ACTORCOMPILER_SRCS})
   target_compile_options(actorcompiler PRIVATE "/langversion:6")
   set_property(TARGET actorcompiler PROPERTY VS_DOTNET_REFERENCES

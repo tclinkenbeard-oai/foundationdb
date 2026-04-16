@@ -234,7 +234,12 @@ function(add_flow_target)
         endforeach()
 
         list(APPEND generated_files ${out_file})
-        if(WIN32)
+        if(USE_PYTHON_AC)
+          add_custom_command(OUTPUT "${out_file}"
+            COMMAND python3 ${actor_exe} "${in_file}" "${out_file}" ${actor_compiler_flags} > /dev/null
+            DEPENDS "${in_file}" ${actor_exe}
+            COMMENT "Compile actor (using python actor): ${src}")
+        elseif(WIN32)
           add_custom_command(OUTPUT "${out_file}"
             COMMAND $<TARGET_FILE:actorcompiler> "${in_file}" "${out_file}" ${actor_compiler_flags}
             DEPENDS "${in_file}" actorcompiler
@@ -290,7 +295,9 @@ function(add_flow_target)
 
     add_custom_target(${AFT_NAME}_actors DEPENDS ${generated_files})
     add_dependencies(${AFT_NAME} ${AFT_NAME}_actors)
-    generate_coverage_xml(${AFT_NAME})
+    if(NOT USE_PYTHON_AC)
+      generate_coverage_xml(${AFT_NAME})
+    endif()
     if(strip_target)
       strip_debug_symbols(${AFT_NAME})
     endif()

@@ -6,7 +6,10 @@ set(VEXILLOGRAPHER_SRCS
   ${CMAKE_CURRENT_SOURCE_DIR}/fdbclient/vexillographer/ruby.cs
   ${CMAKE_CURRENT_SOURCE_DIR}/fdbclient/vexillographer/vexillographer.cs)
 
-if(WIN32)
+if(USE_PYTHON_AC)
+  set(VEXILLOGRAPHER_EXE "${CMAKE_CURRENT_SOURCE_DIR}/fdbclient/vexillographer/vexillographer.py")
+  add_custom_target(vexillographer DEPENDS ${VEXILLOGRAPHER_EXE})
+elseif(WIN32)
   add_executable(vexillographer ${VEXILLOGRAPHER_SRCS})
   target_compile_options(vexillographer PRIVATE  "/langversion:6")
   set_property(TARGET vexillographer PROPERTY VS_DOTNET_REFERENCES
@@ -33,7 +36,13 @@ function(vexillographer_compile)
   if(NOT VX_OUTPUT)
     set(VX_OUTPUT ${VX_OUT})
   endif()
-  if(WIN32)
+  if(USE_PYTHON_AC)
+    add_custom_command(
+      OUTPUT ${VX_OUTPUT}
+      COMMAND python3 ${VEXILLOGRAPHER_EXE} ${CMAKE_SOURCE_DIR}/fdbclient/vexillographer/fdb.options ${VX_LANG} ${VX_OUTPUT}
+      DEPENDS ${CMAKE_SOURCE_DIR}/fdbclient/vexillographer/fdb.options vexillographer
+      COMMENT "Generate FDBOptions ${VX_LANG} files using python")
+  elseif(WIN32)
     add_custom_command(
       OUTPUT ${VX_OUTPUT}
       COMMAND $<TARGET_FILE:vexillographer> ${CMAKE_SOURCE_DIR}/fdbclient/vexillographer/fdb.options ${VX_LANG} ${VX_OUT}
