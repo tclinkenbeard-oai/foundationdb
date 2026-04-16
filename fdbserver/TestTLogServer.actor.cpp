@@ -116,6 +116,7 @@ ACTOR Future<Void> getTLogCreateActor(Reference<TLogTestContext> pTLogTestContex
 
 	Reference<AsyncVar<bool>> isDegraded = FlowTransport::transport().getDegraded();
 	Reference<AsyncVar<UID>> activeSharedTLog(new AsyncVar<UID>(pTLogContext->tLogID));
+	Reference<AsyncVar<bool>> lowDiskTLogExclusion(new AsyncVar<bool>(false));
 	Reference<AsyncVar<bool>> enablePrimaryTxnSystemHealthCheck(new AsyncVar<bool>(false));
 	state PromiseStream<InitializeTLogRequest> promiseStream = PromiseStream<InitializeTLogRequest>();
 	Promise<Void> oldLog;
@@ -134,6 +135,7 @@ ACTOR Future<Void> getTLogCreateActor(Reference<TLogTestContext> pTLogTestContex
 	                               recovery,
 	                               pTLogTestContext->diskQueueBasename,
 	                               isDegraded,
+	                               lowDiskTLogExclusion,
 	                               activeSharedTLog,
 	                               enablePrimaryTxnSystemHealthCheck);
 
