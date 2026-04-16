@@ -695,7 +695,9 @@ private:
 			if (prefix.size() == 0 || keyCount >= UINT16_MAX || valSize >= CLIENT_KNOBS->VALUE_SIZE_LIMIT) {
 				return;
 			}
-			uint8_t keyBuf[prefix.size() + sizeof(uint16_t)];
+			std::vector<uint8_t> vecBuf(prefix.size() + sizeof(uint16_t));
+			uint8_t* keyBuf = vecBuf.data();
+
 			uint8_t* keyPos = prefix.copyTo(keyBuf);
 			*keyPos = '\xff';
 			StringRef keyEnd(keyBuf, keyPos - keyBuf + 1);
