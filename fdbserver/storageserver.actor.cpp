@@ -90,6 +90,7 @@
 #include "fdbserver/MutationTracking.h"
 #include "fdbserver/OTELSpanContextMessage.h"
 #include "fdbserver/Ratekeeper.h"
+#include "fdbserver/ReadLatencySamples.h"
 #include "fdbserver/RecoveryState.h"
 #include "fdbserver/RocksDBCheckpointUtils.actor.h"
 #include "fdbserver/ServerCheckpoint.actor.h"
@@ -174,6 +175,18 @@ bool canReplyWith(Error e) {
 	default:
 		return false;
 	}
+}
+
+template <class Req>
+Optional<ReadType> trackedReadType(Req const& req)
+    requires requires(Req req) {
+	    { req.options } -> std::same_as<Optional<ReadOptions>&>;
+    }
+{
+	if (!SERVER_KNOBS->TRACK_READ_LATENCIES_PER_TYPE) {
+		return {};
+	}
+	return req.options.map([](auto const& options) { return options.type; });
 }
 
 } // namespace
@@ -1546,19 +1559,10 @@ public:
 		// expensive.
 		Counter pTreeClearSplits;
 
-		std::unique_ptr<LatencySample> readLatencySample;
-		std::unique_ptr<LatencySample> readKeyLatencySample;
-		std::unique_ptr<LatencySample> readValueLatencySample;
-		std::unique_ptr<LatencySample> readRangeLatencySample;
-		std::unique_ptr<LatencySample> readVersionWaitSample;
-		std::unique_ptr<LatencySample> readQueueWaitSample;
-		std::unique_ptr<LatencySample> kvReadRangeLatencySample;
+		ReadLatencySamples readLatencySamples;
 		std::unique_ptr<LatencySample> updateLatencySample;
 		std::unique_ptr<LatencySample> updateEncryptionLatencySample;
 		LatencyBands readLatencyBands;
-		std::unique_ptr<LatencySample> mappedRangeSample; // Samples getMappedRange latency
-		std::unique_ptr<LatencySample> mappedRangeRemoteSample; // Samples getMappedRange remote subquery latency
-		std::unique_ptr<LatencySample> mappedRangeLocalSample; // Samples getMappedRange local subquery latency
 		std::unique_ptr<LatencySample> ingestDurationLatencySample;
 
 		explicit Counters(StorageServer* self)
@@ -1593,57 +1597,17 @@ public:
 		    pTreeSets("PTreeSets", cc), pTreeClears("PTreeClears", cc), pTreeClearSplits("PTreeClearSplits", cc),
 		    changeServerKeysAssigned("ChangeServerKeysAssigned", cc),
 		    changeServerKeysUnassigned("ChangeServerKeysUnassigned", cc),
-		    kvClearRangesInFetchKeys("KvClearRangesInFetchKeys", cc),
-		    readLatencySample(std::make_unique<LatencySample>("ReadLatencyMetrics",
-		                                                      self->thisServerID,
-		                                                      SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                      SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
-		    readKeyLatencySample(std::make_unique<LatencySample>("GetKeyMetrics",
-		                                                         self->thisServerID,
-		                                                         SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                         SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
-		    readValueLatencySample(std::make_unique<LatencySample>("GetValueMetrics",
-		                                                           self->thisServerID,
-		                                                           SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                           SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
-		    readRangeLatencySample(std::make_unique<LatencySample>("GetRangeMetrics",
-		                                                           self->thisServerID,
-		                                                           SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                           SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
-		    readVersionWaitSample(std::make_unique<LatencySample>("ReadVersionWaitMetrics",
-		                                                          self->thisServerID,
-		                                                          SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                          SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
-		    readQueueWaitSample(std::make_unique<LatencySample>("ReadQueueWaitMetrics",
-		                                                        self->thisServerID,
-		                                                        SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                        SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
-		    kvReadRangeLatencySample(std::make_unique<LatencySample>("KVGetRangeMetrics",
-		                                                             self->thisServerID,
-		                                                             SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                             SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
+		    kvClearRangesInFetchKeys("KvClearRangesInFetchKeys", cc), readLatencySamples(self->thisServerID),
 		    updateLatencySample(std::make_unique<LatencySample>("UpdateLatencyMetrics",
 		                                                        self->thisServerID,
 		                                                        SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
 		                                                        SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
 		    updateEncryptionLatencySample(
 		        std::make_unique<LatencySample>("UpdateEncryptionLatencyMetrics",
-		                                        self->thisServerID,
-		                                        SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                        SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
+		                                                        self->thisServerID,
+		                                                        SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
+		                                                        SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
 		    readLatencyBands("ReadLatencyBands", self->thisServerID, SERVER_KNOBS->STORAGE_LOGGING_DELAY),
-		    mappedRangeSample(std::make_unique<LatencySample>("GetMappedRangeMetrics",
-		                                                      self->thisServerID,
-		                                                      SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                      SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
-		    mappedRangeRemoteSample(std::make_unique<LatencySample>("GetMappedRangeRemoteMetrics",
-		                                                            self->thisServerID,
-		                                                            SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                            SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
-		    mappedRangeLocalSample(std::make_unique<LatencySample>("GetMappedRangeLocalMetrics",
-		                                                           self->thisServerID,
-		                                                           SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-		                                                           SERVER_KNOBS->LATENCY_SKETCH_ACCURACY)),
 		    ingestDurationLatencySample(std::make_unique<LatencySample>("IngestDurationMetrics",
 		                                                                self->thisServerID,
 		                                                                SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
@@ -2541,7 +2505,8 @@ ACTOR Future<Void> getValueQ(StorageServer* data, GetValueRequest req) {
 
 		// Track time from requestTime through now as read queueing wait time
 		state double queueWaitEnd = g_network->timer();
-		data->counters.readQueueWaitSample->addMeasurement(queueWaitEnd - req.requestTime());
+		data->counters.readLatencySamples.sample(
+		    queueWaitEnd - req.requestTime(), ReadLatencySamples::READ_QUEUE_WAIT, trackedReadType(req));
 
 		if (req.options.present() && req.options.get().debugID.present())
 			g_traceBatch.addEvent("GetValueDebug",
@@ -2551,7 +2516,8 @@ ACTOR Future<Void> getValueQ(StorageServer* data, GetValueRequest req) {
 		state Optional<Value> v;
 		Version commitVersion = getLatestCommitVersion(req.ssLatestCommitVersions, data->tag);
 		state Version version = wait(waitForVersion(data, commitVersion, req.version, req.spanContext));
-		data->counters.readVersionWaitSample->addMeasurement(g_network->timer() - queueWaitEnd);
+		data->counters.readLatencySamples.sample(
+		    g_network->timer() - queueWaitEnd, ReadLatencySamples::READ_VERSION_WAIT, trackedReadType(req));
 
 		if (req.options.present() && req.options.get().debugID.present())
 			g_traceBatch.addEvent("GetValueDebug",
@@ -2649,8 +2615,8 @@ ACTOR Future<Void> getValueQ(StorageServer* data, GetValueRequest req) {
 	++data->counters.finishedQueries;
 
 	double duration = g_network->timer() - req.requestTime();
-	data->counters.readLatencySample->addMeasurement(duration);
-	data->counters.readValueLatencySample->addMeasurement(duration);
+	data->counters.readLatencySamples.sample(duration, ReadLatencySamples::READ, trackedReadType(req));
+	data->counters.readLatencySamples.sample(duration, ReadLatencySamples::READ_VALUE, trackedReadType(req));
 	if (data->latencyBandConfig.present()) {
 		int maxReadBytes =
 		    data->latencyBandConfig.get().readConfig.maxReadBytes.orDefault(std::numeric_limits<int>::max());
@@ -3302,7 +3268,7 @@ static std::deque<Standalone<EncryptedMutationsAndVersionRef>>::const_iterator s
 //   still DISK_CATCHUP (if there is still more disk data to read before the first memory data)
 //   NORMAL (otherwise)
 // NORMAL -> NORMAL (always)
-enum FeedDiskReadState { STARTING, NORMAL, DISK_CATCHUP };
+enum FeedDiskReadState { STARTING, NORMAL_READ, DISK_CATCHUP };
 
 ACTOR Future<std::pair<ChangeFeedStreamReply, bool>> getChangeFeedMutations(StorageServer* data,
                                                                             Reference<ChangeFeedInfo> feedInfo,
@@ -3641,7 +3607,7 @@ ACTOR Future<std::pair<ChangeFeedStreamReply, bool>> getChangeFeedMutations(Stor
 				} else {
 					// else switch to normal mode
 					CODE_PROBE(true, "Feed switching to normal mode");
-					*feedDiskReadState = FeedDiskReadState::NORMAL;
+					*feedDiskReadState = FeedDiskReadState::NORMAL_READ;
 				}
 			}
 		}
@@ -3673,7 +3639,7 @@ ACTOR Future<std::pair<ChangeFeedStreamReply, bool>> getChangeFeedMutations(Stor
 		}
 	} else {
 		reply = memoryReply;
-		*feedDiskReadState = FeedDiskReadState::NORMAL;
+		*feedDiskReadState = FeedDiskReadState::NORMAL_READ;
 
 		// if we processed memory results that got entirely or mostly filtered, but we're not caught up, add an empty at
 		// the end
@@ -4232,7 +4198,8 @@ ACTOR Future<GetValueReqAndResultRef> quickGetValue(StorageServer* data,
 				++data->counters.quickGetValueHit;
 				copyOptionalValue(a, getValue, reply.value);
 				const double duration = g_network->timer() - getValueStart;
-				data->counters.mappedRangeLocalSample->addMeasurement(duration);
+				data->counters.readLatencySamples.sample(
+				    duration, ReadLatencySamples::MAPPED_RANGE_LOCAL, trackedReadType(*pOriginalReq));
 				return getValue;
 			}
 			// Otherwise fallback.
@@ -4256,7 +4223,8 @@ ACTOR Future<GetValueReqAndResultRef> quickGetValue(StorageServer* data,
 		Optional<Value> valueOption = wait(valueFuture);
 		copyOptionalValue(a, getValue, valueOption);
 		double duration = g_network->timer() - getValueStart;
-		data->counters.mappedRangeRemoteSample->addMeasurement(duration);
+		data->counters.readLatencySamples.sample(
+		    duration, ReadLatencySamples::MAPPED_RANGE_REMOTE, trackedReadType(*pOriginalReq));
 		return getValue;
 	} else {
 		throw quick_get_value_miss();
@@ -4747,7 +4715,8 @@ ACTOR Future<Void> getKeyValuesQ(StorageServer* data, GetKeyValuesRequest req)
 
 	// Track time from requestTime through now as read queueing wait time
 	state double queueWaitEnd = g_network->timer();
-	data->counters.readQueueWaitSample->addMeasurement(queueWaitEnd - req.requestTime());
+	data->counters.readLatencySamples.sample(
+	    queueWaitEnd - req.requestTime(), ReadLatencySamples::READ_QUEUE_WAIT, trackedReadType(req));
 
 	try {
 		if (req.options.present() && req.options.get().debugID.present())
@@ -4761,10 +4730,11 @@ ACTOR Future<Void> getKeyValuesQ(StorageServer* data, GetKeyValuesRequest req)
 		    .detail("ReqVersion", req.version)
 		    .detail("Oldest", data->oldestVersion.get())
 		    .detail("VV", req.ssLatestCommitVersions.toString())
-		    .detail("DebugID",
-		            req.options.present() && req.options.get().debugID.present() ? req.options.get().debugID.get()
-		                                                                         : UID());
-		data->counters.readVersionWaitSample->addMeasurement(g_network->timer() - queueWaitEnd);
+		           .detail("DebugID",
+		                   req.options.present() && req.options.get().debugID.present() ? req.options.get().debugID.get()
+		                                                                                : UID());
+		data->counters.readLatencySamples.sample(
+		    g_network->timer() - queueWaitEnd, ReadLatencySamples::READ_VERSION_WAIT, trackedReadType(req));
 
 		data->checkTenantEntry(version, req.tenantInfo, req.options.present() ? req.options.get().lockAware : false);
 		if (req.tenantInfo.hasTenant()) {
@@ -4868,10 +4838,10 @@ ACTOR Future<Void> getKeyValuesQ(StorageServer* data, GetKeyValuesRequest req)
 			                                      req.limit,
 			                                      &remainingLimitBytes,
 			                                      span.context,
-			                                      req.options,
-			                                      req.tenantInfo.prefix));
+		                                      req.options,
+		                                      req.tenantInfo.prefix));
 			const double duration = g_network->timer() - kvReadRange;
-			data->counters.kvReadRangeLatencySample->addMeasurement(duration);
+			data->counters.readLatencySamples.sample(duration, ReadLatencySamples::KV_READ_RANGE, trackedReadType(req));
 			GetKeyValuesReply r = _r;
 
 			if (req.options.present() && req.options.get().debugID.present())
@@ -4932,8 +4902,8 @@ ACTOR Future<Void> getKeyValuesQ(StorageServer* data, GetKeyValuesRequest req)
 	++data->counters.finishedQueries;
 
 	double duration = g_network->timer() - req.requestTime();
-	data->counters.readLatencySample->addMeasurement(duration);
-	data->counters.readRangeLatencySample->addMeasurement(duration);
+	data->counters.readLatencySamples.sample(duration, ReadLatencySamples::READ, trackedReadType(req));
+	data->counters.readLatencySamples.sample(duration, ReadLatencySamples::READ_RANGE, trackedReadType(req));
 	if (data->latencyBandConfig.present()) {
 		int maxReadBytes =
 		    data->latencyBandConfig.get().readConfig.maxReadBytes.orDefault(std::numeric_limits<int>::max());
@@ -4994,7 +4964,8 @@ ACTOR Future<GetRangeReqAndResultRef> quickGetKeyValues(
 			a->dependsOn(reply.arena);
 			getRange.result = RangeResultRef(reply.data, reply.more);
 			const double duration = g_network->timer() - getValuesStart;
-			data->counters.mappedRangeLocalSample->addMeasurement(duration);
+			data->counters.readLatencySamples.sample(
+			    duration, ReadLatencySamples::MAPPED_RANGE_LOCAL, trackedReadType(*pOriginalReq));
 			if (pOriginalReq->options.present() && pOriginalReq->options.get().debugID.present())
 				g_traceBatch.addEvent("TransactionDebug",
 				                      pOriginalReq->options.get().debugID.get().first(),
@@ -5025,7 +4996,8 @@ ACTOR Future<GetRangeReqAndResultRef> quickGetKeyValues(
 		a->dependsOn(rangeResult.arena());
 		getRange.result = rangeResult;
 		const double duration = g_network->timer() - getValuesStart;
-		data->counters.mappedRangeRemoteSample->addMeasurement(duration);
+		data->counters.readLatencySamples.sample(
+		    duration, ReadLatencySamples::MAPPED_RANGE_REMOTE, trackedReadType(*pOriginalReq));
 		if (pOriginalReq->options.present() && pOriginalReq->options.get().debugID.present())
 			g_traceBatch.addEvent("TransactionDebug",
 			                      pOriginalReq->options.get().debugID.get().first(),
@@ -6710,18 +6682,19 @@ ACTOR Future<Void> getMappedKeyValuesQ(StorageServer* data, GetMappedKeyValuesRe
 
 	// Track time from requestTime through now as read queueing wait time
 	state double queueWaitEnd = g_network->timer();
-	data->counters.readQueueWaitSample->addMeasurement(queueWaitEnd - req.requestTime());
+	data->counters.readLatencySamples.sample(
+	    queueWaitEnd - req.requestTime(), ReadLatencySamples::READ_QUEUE_WAIT, trackedReadType(req));
 
 	try {
 		if (req.options.present() && req.options.get().debugID.present())
 			g_traceBatch.addEvent(
 			    "TransactionDebug", req.options.get().debugID.get().first(), "storageserver.getMappedKeyValues.Before");
 		// VERSION_VECTOR change
-		Version commitVersion = getLatestCommitVersion(req.ssLatestCommitVersions, data->tag);
-		state Version version = wait(waitForVersion(data, commitVersion, req.version, span.context));
-		data->counters.readVersionWaitSample->addMeasurement(g_network->timer() - queueWaitEnd);
-
-		data->checkTenantEntry(version, req.tenantInfo, req.options.present() ? req.options.get().lockAware : false);
+	Version commitVersion = getLatestCommitVersion(req.ssLatestCommitVersions, data->tag);
+	state Version version = wait(waitForVersion(data, commitVersion, req.version, span.context));
+	data->counters.readLatencySamples.sample(
+	    g_network->timer() - queueWaitEnd, ReadLatencySamples::READ_VERSION_WAIT, trackedReadType(req));
+	data->checkTenantEntry(version, req.tenantInfo, req.options.present() ? req.options.get().lockAware : false);
 		if (req.tenantInfo.hasTenant()) {
 			req.begin.setKeyUnlimited(req.begin.getKey().withPrefix(req.tenantInfo.prefix.get(), req.arena));
 			req.end.setKeyUnlimited(req.end.getKey().withPrefix(req.tenantInfo.prefix.get(), req.arena));
@@ -6878,8 +6851,8 @@ ACTOR Future<Void> getMappedKeyValuesQ(StorageServer* data, GetMappedKeyValuesRe
 	++data->counters.finishedGetMappedRangeQueries;
 
 	double duration = g_network->timer() - req.requestTime();
-	data->counters.readLatencySample->addMeasurement(duration);
-	data->counters.mappedRangeSample->addMeasurement(duration);
+	data->counters.readLatencySamples.sample(duration, ReadLatencySamples::READ, trackedReadType(req));
+	data->counters.readLatencySamples.sample(duration, ReadLatencySamples::MAPPED_RANGE, trackedReadType(req));
 	if (data->latencyBandConfig.present()) {
 		int maxReadBytes =
 		    data->latencyBandConfig.get().readConfig.maxReadBytes.orDefault(std::numeric_limits<int>::max());
@@ -7125,12 +7098,14 @@ ACTOR Future<Void> getKeyQ(StorageServer* data, GetKeyRequest req) {
 
 	// Track time from requestTime through now as read queueing wait time
 	state double queueWaitEnd = g_network->timer();
-	data->counters.readQueueWaitSample->addMeasurement(queueWaitEnd - req.requestTime());
+	data->counters.readLatencySamples.sample(
+	    queueWaitEnd - req.requestTime(), ReadLatencySamples::READ_QUEUE_WAIT, trackedReadType(req));
 
 	try {
 		Version commitVersion = getLatestCommitVersion(req.ssLatestCommitVersions, data->tag);
 		state Version version = wait(waitForVersion(data, commitVersion, req.version, req.spanContext));
-		data->counters.readVersionWaitSample->addMeasurement(g_network->timer() - queueWaitEnd);
+		data->counters.readLatencySamples.sample(
+		    g_network->timer() - queueWaitEnd, ReadLatencySamples::READ_VERSION_WAIT, trackedReadType(req));
 
 		data->checkTenantEntry(version, req.tenantInfo, req.options.map(&ReadOptions::lockAware).orDefault(false));
 		if (req.tenantInfo.hasTenant()) {
@@ -7193,8 +7168,8 @@ ACTOR Future<Void> getKeyQ(StorageServer* data, GetKeyRequest req) {
 	++data->counters.finishedQueries;
 
 	double duration = g_network->timer() - req.requestTime();
-	data->counters.readLatencySample->addMeasurement(duration);
-	data->counters.readKeyLatencySample->addMeasurement(duration);
+	data->counters.readLatencySamples.sample(duration, ReadLatencySamples::READ, trackedReadType(req));
+	data->counters.readLatencySamples.sample(duration, ReadLatencySamples::READ_KEY, trackedReadType(req));
 
 	if (data->latencyBandConfig.present()) {
 		int maxReadBytes =
@@ -11896,23 +11871,23 @@ private:
 			Standalone<StringRef> prefix;
 			std::tie(prefix, valSize, keyCount, seed) = decodeConstructKeys(m.param2);
 			ASSERT(prefix.size() > 0 && keyCount < UINT16_MAX && valSize < CLIENT_KNOBS->VALUE_SIZE_LIMIT);
-			uint8_t keyBuf[prefix.size() + sizeof(uint16_t)];
-			uint8_t* keyPos = prefix.copyTo(keyBuf);
-			uint8_t valBuf[valSize];
+			std::vector<uint8_t> keyBuf(prefix.size() + sizeof(uint16_t));
+			uint8_t* keyPos = prefix.copyTo(keyBuf.data());
+			std::vector<uint8_t> valBuf(valSize);
 			setThreadLocalDeterministicRandomSeed(seed);
 			for (uint32_t keyNum = 1; keyNum <= keyCount; keyNum += 1) {
 				if ((keyNum % 0xff) == 0) {
 					*keyPos++ = 0;
 				}
 				*keyPos = keyNum % 0xff;
-				auto r = data->shards.rangeContaining(StringRef(keyBuf, keyPos - keyBuf + 1)).value();
+				deterministicRandom()->randomBytes(&valBuf[0], valSize);
+				auto r = data->shards.rangeContaining(StringRef(keyBuf.data(), keyPos - keyBuf.data() + 1)).value();
 				if (!r || !(r->adding || r->moveInShard || r->readWrite)) {
 					break;
 				}
-
-				deterministicRandom()->randomBytes(&valBuf[0], valSize);
-				data->constructedData.emplace_back(Standalone<StringRef>(StringRef(keyBuf, keyPos - keyBuf + 1)),
-				                                   Standalone<StringRef>(StringRef(valBuf, valSize)));
+				data->constructedData.emplace_back(
+				    Standalone<StringRef>(StringRef(keyBuf.data(), keyPos - keyBuf.data() + 1)),
+				    Standalone<StringRef>(StringRef(valBuf.data(), valSize)));
 			}
 			TraceEvent(SevDebug, "ConstructDataBuilder")
 			    .detail("Prefix", prefix)
