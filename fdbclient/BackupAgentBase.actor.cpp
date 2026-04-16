@@ -575,6 +575,7 @@ ACTOR Future<Void> readCommitted(Database cx,
 			if (readLowPriority) {
 				tr.setOption(FDBTransactionOptions::READ_PRIORITY_LOW);
 			}
+			tr.setOption(FDBTransactionOptions::READ_SERVER_SIDE_CACHE_DISABLE);
 
 			// add lock
 			releaser.release();
@@ -659,6 +660,7 @@ ACTOR Future<Void> readCommitted(Database cx,
 			if (readLowPriority) {
 				tr.setOption(FDBTransactionOptions::READ_PRIORITY_LOW);
 			}
+			tr.setOption(FDBTransactionOptions::READ_SERVER_SIDE_CACHE_DISABLE);
 
 			state RangeResult rangevalue = wait(tr.getRange(nextKey, end, limits));
 
