@@ -30,6 +30,8 @@
 #include "flow/IRandom.h"
 #include "flow/network.h"
 
+#include <vector>
+
 // The credentials may be allowed to change, but the storage locations and partitioning cannot change, even across
 // restarts. Keep it as global static state in simulation.
 static std::unordered_map<BlobMetadataDomainId, Standalone<BlobMetadataDetailsRef>> simBlobMetadataStore;
@@ -110,7 +112,7 @@ private:
 		// Note the keys generated must be the same after restart.
 		for (int i = 1; i <= maxEncryptionKeys; i++) {
 			const int keyLen = SimKmsVaultKeyCtx::getKeyLen(i);
-			uint8_t key[keyLen];
+			std::vector<uint8_t> key(keyLen);
 			uint8_t digest[AUTH_TOKEN_HMAC_SHA_SIZE];
 
 			// TODO: Allow baseCipherKeyLen < AES_256_KEY_LENGTH

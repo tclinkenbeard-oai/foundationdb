@@ -410,7 +410,7 @@ public:
 			if (!ctx.outstanding)
 				ctx.ioStallBegin = begin;
 
-			IOBlock* toStart[FLOW_KNOBS->MAX_OUTSTANDING];
+			std::vector<IOBlock*> toStart(FLOW_KNOBS->MAX_OUTSTANDING);
 			int n = std::min<size_t>(FLOW_KNOBS->MAX_OUTSTANDING - ctx.outstanding, ctx.queue.size());
 
 			int64_t previousTruncateCount = ctx.countPreSubmitTruncate;
@@ -441,7 +441,7 @@ public:
 				}
 			}
 			double truncateComplete = timer_monotonic();
-			int rc = io_submit(ctx.iocx, n, (linux_iocb**)toStart);
+			int rc = io_submit(ctx.iocx, n, reinterpret_cast<linux_iocb**>(toStart.data()));
 			double end = timer_monotonic();
 
 			if (end - begin > FLOW_KNOBS->SLOW_LOOP_CUTOFF) {
@@ -726,7 +726,7 @@ private:
 
 			wait(delay(0, TaskPriority::DiskIOComplete));
 
-			linux_ioresult ev[FLOW_KNOBS->MAX_OUTSTANDING];
+			std::vector<linux_ioresult> ev(FLOW_KNOBS->MAX_OUTSTANDING);
 			timespec tm;
 			tm.tv_sec = 0;
 			tm.tv_nsec = 0;
@@ -734,7 +734,7 @@ private:
 			int n;
 
 			loop {
-				n = io_getevents(ctx.iocx, 0, FLOW_KNOBS->MAX_OUTSTANDING, ev, &tm);
+				n = io_getevents(ctx.iocx, 0, FLOW_KNOBS->MAX_OUTSTANDING, ev.data(), &tm);
 				if (n >= 0 || errno != EINTR)
 					break;
 			}

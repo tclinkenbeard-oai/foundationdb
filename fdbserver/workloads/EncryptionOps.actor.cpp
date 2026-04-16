@@ -186,7 +186,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 
 		TraceEvent("SetupCipherEssentialsStart").detail("MinDomainId", minDomainId).detail("MaxDomainId", maxDomainId);
 
-		uint8_t buff[maxBaseCipherLen];
+		std::vector<uint8_t> buff(maxBaseCipherLen);
 		std::vector<Reference<BlobCipherKey>> cipherKeys;
 		int cipherLen = 0;
 		for (EncryptCipherDomainId id = minDomainId; id <= maxDomainId; id++) {
@@ -195,7 +195,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 
 			cipherKeyCache->insertCipherKey(id,
 			                                minBaseCipherId,
-			                                buff,
+			                                &buff[0],
 			                                cipherLen,
 			                                cipherKCV,
 			                                std::numeric_limits<int64_t>::max(),
@@ -213,14 +213,14 @@ struct EncryptionOpsWorkload : TestWorkload {
 		const EncryptCipherKeyCheckValue cipherKCV = Sha256KCV().computeKCV(&buff[0], cipherLen);
 		cipherKeyCache->insertCipherKey(ENCRYPT_HEADER_DOMAIN_ID,
 		                                headerBaseCipherId,
-		                                buff,
+		                                &buff[0],
 		                                cipherLen,
 		                                cipherKCV,
 		                                std::numeric_limits<int64_t>::max(),
 		                                std::numeric_limits<int64_t>::max());
 		Reference<BlobCipherKey> latestCipher = cipherKeyCache->getLatestCipherKey(ENCRYPT_HEADER_DOMAIN_ID);
 		ASSERT_EQ(latestCipher->getBaseCipherId(), headerBaseCipherId);
-		ASSERT_EQ(memcmp(latestCipher->rawBaseCipher(), buff, cipherLen), 0);
+		ASSERT_EQ(memcmp(latestCipher->rawBaseCipher(), &buff[0], cipherLen), 0);
 		headerRandomSalt = latestCipher->getSalt();
 
 		TraceEvent("SetupCipherEssentialsDone")
@@ -454,7 +454,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 	}
 
 	void testBlobCipherKeyCacheOps() {
-		uint8_t baseCipher[maxBaseCipherLen];
+		std::vector<uint8_t> baseCipher(maxBaseCipherLen);
 		int baseCipherLen = 0;
 		EncryptCipherBaseKeyId nextBaseCipherId;
 
@@ -497,7 +497,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 			if (updateBaseCipher) {
 				ASSERT_EQ(cipherKey->getBaseCipherId(), nextBaseCipherId);
 				ASSERT_EQ(cipherKey->getBaseCipherLen(), baseCipherLen);
-				ASSERT_EQ(memcmp(cipherKey->rawBaseCipher(), baseCipher, baseCipherLen), 0);
+				ASSERT_EQ(memcmp(cipherKey->rawBaseCipher(), &baseCipher[0], baseCipherLen), 0);
 			}
 
 			int dataLen = isFixedSizePayload() ? pageSize : deterministicRandom()->randomInt(100, maxBufSize);

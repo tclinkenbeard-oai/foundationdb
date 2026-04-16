@@ -538,10 +538,7 @@ double swapDoubleBE(uint8_t* index) {
 }
 
 std::string readMPString(uint8_t* index, int len) {
-	uint8_t data[len + 1];
-	std::copy(index, index + len, data);
-	data[len] = '\0';
-	return reinterpret_cast<char*>(data);
+	return std::string(reinterpret_cast<char*>(index), len);
 }
 
 std::string readMPString(uint8_t* index) {
@@ -558,10 +555,7 @@ std::string readMPString(uint8_t* index) {
 		len = static_cast<uint8_t>(*index & 0b00011111);
 		index++;
 	}
-	uint8_t data[len + 1];
-	std::copy(index, index + len, data);
-	data[len] = '\0';
-	return reinterpret_cast<char*>(data);
+	return readMPString(index, len);
 }
 
 // Windows doesn't like lack of header and declaration of constructor for FastUDPTracer

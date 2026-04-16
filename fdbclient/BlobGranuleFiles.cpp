@@ -1371,7 +1371,7 @@ static RangeResult mergeDeltaStreams(const BlobGranuleChunkRef& chunk,
 	int maxExpectedSize = 0;
 
 	// check if a given stream is actively clearing
-	bool clearActive[streams.size()];
+	std::vector<bool> clearActive(streams.size());
 	for (int16_t i = 0; i < streams.size(); i++) {
 		clearActive[i] = startClears[i];
 		if (startClears[i]) {
@@ -1652,7 +1652,7 @@ ErrorOr<RangeResult> loadAndMaterializeBlobGranules(const Standalone<VectorRef<B
 		parallelism = CLIENT_KNOBS->BG_MAX_GRANULE_PARALLELISM;
 	}
 
-	GranuleLoadIds loadIds[files.size()];
+	std::vector<GranuleLoadIds> loadIds(files.size());
 
 	try {
 		// Kick off first file reads if parallelism > 1

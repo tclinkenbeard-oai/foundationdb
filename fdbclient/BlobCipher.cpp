@@ -486,14 +486,14 @@ void BlobCipherKey::initKey(const EncryptCipherDomainId& domainId,
 
 void BlobCipherKey::applyHmacSha256Derivation() {
 	Arena arena;
-	uint8_t buf[baseCipherLen + sizeof(EncryptCipherRandomSalt)];
+	std::vector<uint8_t> buf(baseCipherLen + sizeof(EncryptCipherRandomSalt));
 	memcpy(&buf[0], baseCipher.get(), baseCipherLen);
 	memcpy(&buf[0] + baseCipherLen, &randomSalt, sizeof(EncryptCipherRandomSalt));
 	HmacSha256DigestGen hmacGen(baseCipher.get(), baseCipherLen);
 	unsigned int digestLen = hmacGen.digest(
 	    { { &buf[0], baseCipherLen + sizeof(EncryptCipherRandomSalt) } }, cipher.get(), AUTH_TOKEN_HMAC_SHA_SIZE);
 	if (digestLen < AES_256_KEY_LENGTH) {
-		memcpy(cipher.get() + digestLen, buf, AES_256_KEY_LENGTH - digestLen);
+		memcpy(cipher.get() + digestLen, buf.data(), AES_256_KEY_LENGTH - digestLen);
 	}
 }
 
@@ -1977,7 +1977,7 @@ void testMaxBaseCipherLen() {
 	TraceEvent("TestMaxBaseCipherLenStart");
 	try {
 		const int baseCipherLen = deterministicRandom()->randomInt(MAX_BASE_CIPHER_LEN + 1, MAX_BASE_CIPHER_LEN + 10);
-		uint8_t baseCipher[baseCipherLen];
+		std::vector<uint8_t> baseCipher(baseCipherLen);
 		deterministicRandom()->randomBytes(&baseCipher[0], baseCipherLen);
 		const EncryptCipherKeyCheckValue baseCipherKCV = Sha256KCV().computeKCV(&baseCipher[0], baseCipherLen);
 		Reference<BlobCipherKey> cipher = makeReference<BlobCipherKey>(1,
@@ -2079,8 +2079,8 @@ void testKeyCacheEssentials(DomainKeyMap& domainKeyMap,
 	// Ensure attempting to insert an existing cipherKey (modified) fails with appropriate error
 	try {
 		Reference<BaseCipher> baseCipher = domainKeyMap[minDomainId][minBaseCipherKeyId];
-		uint8_t rawCipher[baseCipher->len];
-		memcpy(rawCipher, baseCipher->key.get(), baseCipher->len);
+		std::vector<uint8_t> rawCipher(baseCipher->len);
+		memcpy(rawCipher.data(), baseCipher->key.get(), baseCipher->len);
 		// modify cipherKey by flipping a bit
 		const int idx = deterministicRandom()->randomInt(0, baseCipher->len);
 		rawCipher[idx]++;
@@ -2224,7 +2224,7 @@ void testNoAuthMode(const int minDomainId) {
 	Reference<BlobCipherKey> cipherKey = cipherKeyCache->getLatestCipherKey(minDomainId);
 	Reference<BlobCipherKey> headerCipherKey = cipherKeyCache->getLatestCipherKey(ENCRYPT_HEADER_DOMAIN_ID);
 	const int bufLen = deterministicRandom()->randomInt(786, 2127) + 512;
-	uint8_t orgData[bufLen];
+	std::vector<uint8_t> orgData(bufLen);
 	deterministicRandom()->randomBytes(&orgData[0], bufLen);
 
 	Arena arena;
@@ -2309,7 +2309,7 @@ void testNoAuthMode(const int minDomainId) {
 	// induce encrypted buffer payload corruption
 	try {
 		encrypted = encryptor.encrypt(&orgData[0], bufLen, &header, arena);
-		uint8_t temp[bufLen];
+		std::vector<uint8_t> temp(bufLen);
 		deterministicRandom()->randomBytes(&temp[0], bufLen);
 		memcpy(encrypted->begin(), &temp[0], bufLen);
 		int tIdx = deterministicRandom()->randomInt(0, bufLen - 1);
@@ -2423,7 +2423,7 @@ void testConfigurableEncryptionHeaderNoAuthMode(const int minDomainId) {
 	Reference<BlobCipherKey> cipherKey = cipherKeyCache->getLatestCipherKey(minDomainId);
 	Reference<BlobCipherKey> headerCipherKey = cipherKeyCache->getLatestCipherKey(ENCRYPT_HEADER_DOMAIN_ID);
 	const int bufLen = deterministicRandom()->randomInt(786, 2127) + 512;
-	uint8_t orgData[bufLen];
+	std::vector<uint8_t> orgData(bufLen);
 	deterministicRandom()->randomBytes(&orgData[0], bufLen);
 
 	Arena arena;
@@ -2480,7 +2480,7 @@ void testConfigurableEncryptionNoAuthMode(const int minDomainId) {
 	Reference<BlobCipherKey> cipherKey = cipherKeyCache->getLatestCipherKey(minDomainId);
 	Reference<BlobCipherKey> headerCipherKey = cipherKeyCache->getLatestCipherKey(ENCRYPT_HEADER_DOMAIN_ID);
 	const int bufLen = deterministicRandom()->randomInt(786, 2127) + 512;
-	uint8_t orgData[bufLen];
+	std::vector<uint8_t> orgData(bufLen);
 	deterministicRandom()->randomBytes(&orgData[0], bufLen);
 
 	Arena arena;
@@ -2540,7 +2540,7 @@ void testConfigurableEncryptionNoAuthMode(const int minDomainId) {
 	// induce encrypted buffer payload corruption
 	try {
 		encryptedBuf = encryptor.encrypt(&orgData[0], bufLen, &headerRef, arena);
-		uint8_t temp[bufLen];
+		std::vector<uint8_t> temp(bufLen);
 		deterministicRandom()->randomBytes(&temp[0], bufLen);
 		memcpy((void*)encryptedBuf.begin(), &temp[0], bufLen);
 		int tIdx = deterministicRandom()->randomInt(0, bufLen - 1);
@@ -2590,7 +2590,7 @@ void testSingleAuthMode(const int minDomainId) {
 	Arena arena;
 	uint8_t iv[AES_256_IV_LENGTH];
 	deterministicRandom()->randomBytes(&iv[0], AES_256_IV_LENGTH);
-	uint8_t orgData[bufLen];
+	std::vector<uint8_t> orgData(bufLen);
 	deterministicRandom()->randomBytes(&orgData[0], bufLen);
 
 	EncryptBlobCipherAes265Ctr encryptor(cipherKey,
@@ -2693,8 +2693,8 @@ void testSingleAuthMode(const int minDomainId) {
 	// induce encrypted buffer payload corruption
 	try {
 		encrypted = encryptor.encrypt(&orgData[0], bufLen, &header, arena);
-		uint8_t temp[bufLen];
-		deterministicRandom()->randomBytes(temp, bufLen);
+		std::vector<uint8_t> temp(bufLen);
+		deterministicRandom()->randomBytes(temp.data(), bufLen);
 		memcpy(encrypted->begin(), &temp[0], bufLen);
 		int tIdx = deterministicRandom()->randomInt(0, bufLen - 1);
 		temp[tIdx] += 1;
@@ -2743,7 +2743,7 @@ void testConfigurableEncryptionHeaderSingleAuthMode(int minDomainId) {
 	Arena arena;
 	uint8_t iv[AES_256_IV_LENGTH];
 	deterministicRandom()->randomBytes(&iv[0], AES_256_IV_LENGTH);
-	uint8_t orgData[bufLen];
+	std::vector<uint8_t> orgData(bufLen);
 	deterministicRandom()->randomBytes(&orgData[0], bufLen);
 
 	EncryptBlobCipherAes265Ctr encryptor(cipherKey,
@@ -2815,7 +2815,7 @@ void testConfigurableEncryptionSingleAuthMode(const int minDomainId) {
 	Arena arena;
 	uint8_t iv[AES_256_IV_LENGTH];
 	deterministicRandom()->randomBytes(&iv[0], AES_256_IV_LENGTH);
-	uint8_t orgData[bufLen];
+	std::vector<uint8_t> orgData(bufLen);
 	deterministicRandom()->randomBytes(&orgData[0], bufLen);
 
 	EncryptBlobCipherAes265Ctr encryptor(cipherKey,
@@ -2904,8 +2904,8 @@ void testConfigurableEncryptionSingleAuthMode(const int minDomainId) {
 	// induce encrypted buffer payload corruption
 	try {
 		encryptedBuf = encryptor.encrypt(&orgData[0], bufLen, &headerRef, arena);
-		uint8_t temp[bufLen];
-		deterministicRandom()->randomBytes(temp, bufLen);
+		std::vector<uint8_t> temp(bufLen);
+		deterministicRandom()->randomBytes(temp.data(), bufLen);
 		memcpy((void*)encryptedBuf.begin(), &temp[0], bufLen);
 		int tIdx = deterministicRandom()->randomInt(0, bufLen - 1);
 		temp[tIdx] += 1;
@@ -2971,11 +2971,11 @@ void testEncryptInplaceNoAuthMode(const int minDomainId) {
 	Reference<BlobCipherKey> headerCipherKey = cipherKeyCache->getLatestCipherKey(ENCRYPT_HEADER_DOMAIN_ID);
 	const int bufLen = deterministicRandom()->randomInt(786, 2127) + 512;
 	// allocate the data align with AES_BLOCK_SIZE, encryption starts from orgData[1] so it's not aligned.
-	alignas(AES_BLOCK_SIZE) uint8_t orgData[bufLen + 1];
+	std::vector<uint8_t> orgData(bufLen + 1);
 	uint8_t* plaintext = &orgData[1];
 	deterministicRandom()->randomBytes(plaintext, bufLen);
-	uint8_t dataClone[bufLen];
-	memcpy(dataClone, plaintext, bufLen);
+	std::vector<uint8_t> dataClone(bufLen);
+	memcpy(dataClone.data(), plaintext, bufLen);
 
 	Arena arena;
 	uint8_t iv[AES_256_IV_LENGTH];
@@ -3001,7 +3001,7 @@ void testEncryptInplaceNoAuthMode(const int minDomainId) {
 	    tCipherKey, Reference<BlobCipherKey>(), &noAuth.v1.iv[0], BlobCipherMetrics::TEST);
 
 	decryptor.decryptInplace(plaintext, bufLen, headerRef);
-	ASSERT_EQ(memcmp(dataClone, plaintext, bufLen), 0);
+	ASSERT_EQ(memcmp(dataClone.data(), plaintext, bufLen), 0);
 
 	TraceEvent("EncryptInplaceDone");
 }
@@ -3024,11 +3024,11 @@ void testEncryptInplaceSingleAuthMode(const int minDomainId) {
 	Arena arena;
 	uint8_t iv[AES_256_IV_LENGTH];
 	deterministicRandom()->randomBytes(&iv[0], AES_256_IV_LENGTH);
-	uint8_t orgData[bufLen + 100];
-	memset(orgData + bufLen, 0, 100);
+	std::vector<uint8_t> orgData(bufLen + 100);
+	memset(orgData.data() + bufLen, 0, 100);
 	deterministicRandom()->randomBytes(&orgData[0], bufLen);
-	uint8_t dataClone[bufLen];
-	memcpy(dataClone, orgData, bufLen);
+	std::vector<uint8_t> dataClone(bufLen);
+	memcpy(dataClone.data(), orgData.data(), bufLen);
 
 	EncryptBlobCipherAes265Ctr encryptor(cipherKey,
 	                                     headerCipherKey,
@@ -3039,8 +3039,6 @@ void testEncryptInplaceSingleAuthMode(const int minDomainId) {
 	                                     BlobCipherMetrics::TEST);
 	BlobCipherEncryptHeader header;
 	encryptor.encryptInplace(&orgData[0], bufLen, &header);
-	uint8_t empty_buff[100];
-	memset(empty_buff, 0, 100);
 
 	Reference<BlobCipherKey> tCipherKey = cipherKeyCache->getCipherKey(
 	    header.cipherTextDetails.encryptDomainId, header.cipherTextDetails.baseCipherId, header.cipherTextDetails.salt);
@@ -3050,7 +3048,7 @@ void testEncryptInplaceSingleAuthMode(const int minDomainId) {
 
 	DecryptBlobCipherAes256Ctr decryptor(tCipherKey, hCipherKey, header.iv, BlobCipherMetrics::TEST);
 	decryptor.decryptInplace(&orgData[0], bufLen, header);
-	ASSERT_EQ(memcmp(dataClone, &orgData[0], bufLen), 0);
+	ASSERT_EQ(memcmp(dataClone.data(), &orgData[0], bufLen), 0);
 
 	TraceEvent("BlobCipherTestEncryptInplaceSingleAuthEnd").detail("Mode", authAlgoStr);
 }

@@ -24,6 +24,7 @@
 #include "flow/IRandom.h"
 #include "flow/UnitTest.h"
 #include <limits>
+#include <vector>
 
 TEST_CASE("/fdbserver/IPager/ArenaPage/PageContentChecksum") {
 	auto& g_knobs = IKnobCollection::getMutableGlobalKnobCollection();
@@ -36,13 +37,13 @@ TEST_CASE("/fdbserver/IPager/ArenaPage/PageContentChecksum") {
 		PhysicalPageID pageID = deterministicRandom()->randomUInt32();
 		if (encodingType == AESEncryption || encodingType == AESEncryptionWithAuth) {
 			const int cipherBytesLen = deterministicRandom()->randomInt(4, MAX_BASE_CIPHER_LEN + 1);
-			uint8_t cipherKeyBytes[cipherBytesLen];
-			deterministicRandom()->randomBytes(cipherKeyBytes, cipherBytesLen);
-			const EncryptCipherKeyCheckValue cipherKCV = Sha256KCV().computeKCV(cipherKeyBytes, cipherBytesLen);
+			std::vector<uint8_t> cipherKeyBytes(cipherBytesLen);
+			deterministicRandom()->randomBytes(cipherKeyBytes.data(), cipherBytesLen);
+			const EncryptCipherKeyCheckValue cipherKCV = Sha256KCV().computeKCV(cipherKeyBytes.data(), cipherBytesLen);
 			Reference<BlobCipherKey> cipherKey =
 			    makeReference<BlobCipherKey>(0 /*domainId*/,
 			                                 1 /*baseCipherId*/,
-			                                 &cipherKeyBytes[0],
+			                                 cipherKeyBytes.data(),
 			                                 cipherBytesLen,
 			                                 cipherKCV,
 			                                 std::numeric_limits<int64_t>::max() /*refreshAt*/,
