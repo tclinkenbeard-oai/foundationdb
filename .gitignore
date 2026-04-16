@@ -108,3 +108,8 @@ temp/
 /.ccls-cache
 .clangd/
 .stignore
+BUILD.bazel
+MODULE.bazel*
+pregenerated
+bazel-*
+contrib/TestHarness/mono_crash.*.json
