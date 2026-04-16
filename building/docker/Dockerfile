@@ -26,5 +26,9 @@ RUN --mount=type=bind,target=/src/fdb,rw \
         -G Ninja -B build_output -S . && \
     cd /src/fdb/build_output && \
     ninja -j20 && \
-    ninja -j20 bindings/python/python_binding
+    ninja -j20 bindings/python/python_binding && \
+    mkdir -p /out && \
+    cp -a /src/fdb/build_output/packages /out/
 
+FROM scratch AS artifacts
+COPY --from=buildfdb /out/packages /packages
