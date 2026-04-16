@@ -6,6 +6,9 @@ package openai.fdbci.joshua_proxy.v1;
 service JoshuaProxy {
   // Submits a Joshua correctness job and returns a job ID for tracking.
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobReply);
+  // Uploads a correctness tarball to the canonical blob container and returns its URL.
+  rpc UploadCorrectnessTarball(stream UploadCorrectnessTarballRequest)
+      returns (UploadCorrectnessTarballReply);
   // Returns the current status of a previously submitted job.
   rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusReply);
   // Lists Joshua ensembles for a selected listing mode.
@@ -28,6 +31,32 @@ message SubmitJobRequest {
 message SubmitJobReply {
   // Job ID assigned by Joshua.
   string job_id = 1;
+}
+
+// Optional metadata sent as the first message in UploadCorrectnessTarball.
+message UploadCorrectnessTarballMetadata {
+  // Optional original filename (used only to derive a readable blob name suffix).
+  string filename = 1;
+}
+
+// Streaming request payload for UploadCorrectnessTarball.
+message UploadCorrectnessTarballRequest {
+  oneof payload {
+    // Optional metadata; if present, it must be sent before any chunks.
+    UploadCorrectnessTarballMetadata metadata = 1;
+    // Tarball bytes. Clients should split large uploads into multiple chunks.
+    bytes chunk = 2;
+  }
+}
+
+// Response payload for UploadCorrectnessTarball.
+message UploadCorrectnessTarballReply {
+  // Public HTTPS URL to the uploaded correctness tarball blob.
+  string correctness_package_url = 1;
+  // Blob name (path within the container) created by the proxy.
+  string blob_name = 2;
+  // Number of bytes uploaded.
+  uint64 size_bytes = 3;
 }
 
 // Request payload for GetJobStatus.
@@ -65,6 +94,7 @@ message ListEnsemblesRequest {
   enum ListMode {
     LIST_MODE_RUNNING = 0;
     LIST_MODE_STOPPED = 1;
+    LIST_MODE_ALL = 2;
   }
   // Defaults to LIST_MODE_RUNNING when unset.
   ListMode mode = 1;
