@@ -261,8 +261,35 @@ if (( ${#tarballs[@]} )); then
   joshua_runs="${JOSHUA_RUNS:-${default_joshua_runs}}"
   joshua_commit_hash="${BUILDKITE_COMMIT:-}"
   joshua_description="${JOSHUA_DESCRIPTION:-}"
-  if [[ -z "${joshua_description}" && -n "${BUILDKITE_PULL_REQUEST:-}" && "${BUILDKITE_PULL_REQUEST}" != "false" ]]; then
-    joshua_description="PR ${BUILDKITE_PULL_REQUEST} CI"
+  joshua_pull_request="${BUILDKITE_PULL_REQUEST:-}"
+  joshua_branch_name="${BUILDKITE_BRANCH:-}"
+  joshua_build_number="${BUILDKITE_BUILD_NUMBER:-}"
+  if [[ -z "${joshua_branch_name}" ]] && command -v git >/dev/null; then
+    joshua_branch_name="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [[ "${joshua_branch_name}" == "HEAD" ]]; then
+      joshua_branch_name=""
+    fi
+  fi
+  if [[ -z "${joshua_description}" ]]; then
+    if [[ -z "${joshua_pull_request}" || "${joshua_pull_request}" == "false" ]]; then
+      echo "BUILDKITE_PULL_REQUEST unavailable; Joshua description will not include PR number"
+    fi
+    if [[ -z "${joshua_branch_name}" ]]; then
+      echo "BUILDKITE_BRANCH unavailable and git branch name could not be resolved; Joshua description will not include branch name"
+    fi
+    if [[ -z "${joshua_build_number}" ]]; then
+      echo "BUILDKITE_BUILD_NUMBER unavailable; Joshua description will not include build number"
+    fi
+    if [[ -n "${joshua_pull_request}" && "${joshua_pull_request}" != "false" && -n "${joshua_branch_name}" ]]; then
+      joshua_description="PR ${joshua_pull_request} branch ${joshua_branch_name} CI"
+    elif [[ -n "${joshua_pull_request}" && "${joshua_pull_request}" != "false" ]]; then
+      joshua_description="PR ${joshua_pull_request} CI"
+    elif [[ -n "${joshua_branch_name}" ]]; then
+      joshua_description="Branch ${joshua_branch_name} CI"
+    fi
+    if [[ -n "${joshua_description}" && -n "${joshua_build_number}" ]]; then
+      joshua_description="${joshua_description} build ${joshua_build_number}"
+    fi
   fi
   if [[ -z "${joshua_commit_hash}" ]] && command -v git >/dev/null; then
     joshua_commit_hash="$(git rev-parse HEAD 2>/dev/null || true)"
