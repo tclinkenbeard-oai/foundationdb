@@ -231,6 +231,112 @@ struct RunnerListDestroyer : NonCopyable {
 	RunnerList* list;
 };
 
+struct Event {
+	enum class Kind { Add, Complete, Error };
+
+	Kind kind;
+	Future<Void> actor;
+	RunnerList::iterator runner;
+	Error err;
+
+	static Event add(Future<Void> actor) {
+		return Event{ Kind::Add, std::move(actor), RunnerList::iterator(), Error() };
+	}
+	static Event complete(RunnerList::iterator runner) {
+		return Event{ Kind::Complete, Future<Void>(), runner, Error() };
+	}
+	static Event error(Error err) { return Event{ Kind::Error, Future<Void>(), RunnerList::iterator(), err }; }
+};
+
+struct EventActor final : Actor<Event>,
+                          ActorSingleCallback<EventActor, 0, Future<Void>>,
+                          ActorSingleCallback<EventActor, 1, RunnerList::iterator>,
+                          ActorSingleCallback<EventActor, 2, Error>,
+                          FastAllocated<EventActor> {
+	FutureStream<Future<Void>> addActor;
+	FutureStream<RunnerList::iterator> complete;
+	FutureStream<Error> errors;
+
+	using FastAllocated<EventActor>::operator new;
+	using FastAllocated<EventActor>::operator delete;
+
+	EventActor(FutureStream<Future<Void>> addActor,
+	           FutureStream<RunnerList::iterator> complete,
+	           FutureStream<Error> errors)
+	  : addActor(std::move(addActor)), complete(std::move(complete)), errors(std::move(errors)) {
+		this->actor_wait_state = ACTOR_WAIT_STATE_WAITING;
+
+		auto addActorStream = this->addActor;
+		addActorStream.addCallbackAndClear(static_cast<ActorSingleCallback<EventActor, 0, Future<Void>>*>(this));
+		auto completeStream = this->complete;
+		completeStream.addCallbackAndClear(
+		    static_cast<ActorSingleCallback<EventActor, 1, RunnerList::iterator>*>(this));
+		auto errorsStream = this->errors;
+		errorsStream.addCallbackAndClear(static_cast<ActorSingleCallback<EventActor, 2, Error>*>(this));
+	}
+
+	void removeCallbacks() {
+		static_cast<ActorSingleCallback<EventActor, 0, Future<Void>>*>(this)->remove();
+		static_cast<ActorSingleCallback<EventActor, 1, RunnerList::iterator>*>(this)->remove();
+		static_cast<ActorSingleCallback<EventActor, 2, Error>*>(this)->remove();
+	}
+
+	void finish(Event event) {
+		this->actor_wait_state = ACTOR_WAIT_STATE_NOT_WAITING;
+		removeCallbacks();
+		this->SAV<Event>::sendAndDelPromiseRef(std::move(event));
+	}
+
+	void fail(Error e) {
+		this->actor_wait_state = ACTOR_WAIT_STATE_NOT_WAITING;
+		removeCallbacks();
+		this->SAV<Event>::sendErrorAndDelPromiseRef(e);
+	}
+
+	void a_callback_fire(ActorSingleCallback<EventActor, 0, Future<Void>>*, Future<Void> const& actor) {
+		finish(Event::add(actor));
+	}
+	void a_callback_fire(ActorSingleCallback<EventActor, 0, Future<Void>>*, Future<Void>&& actor) {
+		finish(Event::add(std::move(actor)));
+	}
+	void a_callback_error(ActorSingleCallback<EventActor, 0, Future<Void>>*, Error e) { fail(e); }
+
+	void a_callback_fire(ActorSingleCallback<EventActor, 1, RunnerList::iterator>*,
+	                     RunnerList::iterator const& runner) {
+		finish(Event::complete(runner));
+	}
+	void a_callback_error(ActorSingleCallback<EventActor, 1, RunnerList::iterator>*, Error e) { fail(e); }
+
+	void a_callback_fire(ActorSingleCallback<EventActor, 2, Error>*, Error const& e) { finish(Event::error(e)); }
+	void a_callback_error(ActorSingleCallback<EventActor, 2, Error>*, Error e) { fail(e); }
+
+	void cancel() override {
+		const auto waitState = this->actor_wait_state;
+		this->actor_wait_state = ACTOR_WAIT_STATE_CANCELLED;
+		if (actorWaitStateIsWaiting(waitState)) {
+			removeCallbacks();
+			this->SAV<Event>::sendErrorAndDelPromiseRef(actor_cancelled());
+		}
+	}
+
+	void destroy() override { delete this; }
+};
+
+inline Future<Event> actorCollectionEvent(FutureStream<Future<Void>> addActor,
+                                          FutureStream<RunnerList::iterator> complete,
+                                          FutureStream<Error> errors) {
+	if (addActor.isReady()) {
+		return Event::add(addActor.pop());
+	}
+	if (complete.isReady()) {
+		return Event::complete(complete.pop());
+	}
+	if (errors.isReady()) {
+		return Event::error(errors.pop());
+	}
+	return Future<Event>(new EventActor(std::move(addActor), std::move(complete), std::move(errors)));
+}
+
 inline Future<Void> runnerHandler(PromiseStream<RunnerList::iterator> output,
                                   PromiseStream<Error> errors,
                                   Future<Void> task,
@@ -246,12 +352,13 @@ inline Future<Void> runnerHandler(PromiseStream<RunnerList::iterator> output,
 	}
 }
 
-inline Future<Void> actorCollectionImpl(FutureStream<Future<Void>> addActor,
-                                        int* pCount,
-                                        double* lastChangeTime,
-                                        double* idleTime,
-                                        double* allTime,
-                                        bool returnWhenEmptied) {
+inline Future<Void> actorCollectionNonEmptyImpl(FutureStream<Future<Void>> addActor,
+                                                Future<Void> firstActor,
+                                                int* pCount,
+                                                double* lastChangeTime,
+                                                double* idleTime,
+                                                double* allTime,
+                                                bool returnWhenEmptied) {
 	RunnerList runners;
 	RunnerListDestroyer runnersDestroyer(&runners);
 	PromiseStream<RunnerList::iterator> complete;
@@ -261,13 +368,38 @@ inline Future<Void> actorCollectionImpl(FutureStream<Future<Void>> addActor,
 		pCount = &count;
 	}
 
-	while (true) {
-		auto result = co_await race(addActor, complete.getFuture(), errors.getFuture());
-		if (result.index() == 0) {
-			Future<Void> f = std::get<0>(std::move(result));
-			auto i = runners.insert(runners.end(), *new Runner());
-			Future<Void> handler = runnerHandler(complete, errors, f, i);
-			i->handler = handler;
+	auto addRunner = [&](Future<Void> f) {
+		auto i = runners.insert(runners.end(), *new Runner());
+		Future<Void> handler = runnerHandler(complete, errors, std::move(f), i);
+		i->handler = handler;
+
+		++*pCount;
+		if (*pCount == 1 && lastChangeTime && idleTime && allTime) {
+			double currentTime = now();
+			*idleTime += currentTime - *lastChangeTime;
+			*allTime += currentTime - *lastChangeTime;
+			*lastChangeTime = currentTime;
+		}
+	};
+
+	auto addOnlyRunnerOrReady = [&](Future<Void> f) {
+		if (f.isReady()) {
+			if (f.isError()) {
+				Error e = f.getError();
+				if (e.code() == error_code_actor_cancelled) {
+					addRunner(std::move(f));
+					return false;
+				}
+
+				++*pCount;
+				if (*pCount == 1 && lastChangeTime && idleTime && allTime) {
+					double currentTime = now();
+					*idleTime += currentTime - *lastChangeTime;
+					*allTime += currentTime - *lastChangeTime;
+					*lastChangeTime = currentTime;
+				}
+				throw e;
+			}
 
 			++*pCount;
 			if (*pCount == 1 && lastChangeTime && idleTime && allTime) {
@@ -276,8 +408,38 @@ inline Future<Void> actorCollectionImpl(FutureStream<Future<Void>> addActor,
 				*allTime += currentTime - *lastChangeTime;
 				*lastChangeTime = currentTime;
 			}
-		} else if (result.index() == 1) {
-			auto i = std::get<1>(std::move(result));
+			if (!--*pCount) {
+				if (lastChangeTime && idleTime && allTime) {
+					double currentTime = now();
+					*allTime += currentTime - *lastChangeTime;
+					*lastChangeTime = currentTime;
+				}
+				return returnWhenEmptied;
+			}
+			return false;
+		}
+
+		addRunner(std::move(f));
+		return false;
+	};
+
+	if (addOnlyRunnerOrReady(std::move(firstActor))) {
+		co_return;
+	}
+
+	while (true) {
+		if (runners.empty()) {
+			if (addOnlyRunnerOrReady(co_await addActor)) {
+				co_return;
+			}
+			continue;
+		}
+
+		Event event = co_await actorCollectionEvent(addActor, complete.getFuture(), errors.getFuture());
+		if (event.kind == Event::Kind::Add) {
+			addRunner(std::move(event.actor));
+		} else if (event.kind == Event::Kind::Complete) {
+			auto i = event.runner;
 			if (!--*pCount) {
 				if (lastChangeTime && idleTime && allTime) {
 					double currentTime = now();
@@ -290,9 +452,21 @@ inline Future<Void> actorCollectionImpl(FutureStream<Future<Void>> addActor,
 			}
 			runners.erase_and_dispose(i, [](Runner* r) { delete r; });
 		} else {
-			throw std::get<2>(std::move(result));
+			throw event.err;
 		}
 	}
+}
+
+inline Future<Void> actorCollectionImpl(FutureStream<Future<Void>> addActor,
+                                        int* pCount,
+                                        double* lastChangeTime,
+                                        double* idleTime,
+                                        double* allTime,
+                                        bool returnWhenEmptied,
+                                        NoThrowOnCancel = {}) {
+	Future<Void> firstActor = co_await addActor;
+	co_await actorCollectionNonEmptyImpl(
+	    addActor, std::move(firstActor), pCount, lastChangeTime, idleTime, allTime, returnWhenEmptied);
 }
 
 } // namespace actor_collection_detail
