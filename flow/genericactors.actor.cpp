@@ -262,16 +262,6 @@ ACTOR Future<int> getVoidErrorCode(Future<Void> future) {
 	}
 }
 
-ACTOR Future<Void> genericCoroFailIfNotCancelled() {
-	wait(delay(0));
-	ASSERT(false);
-	return Void();
-}
-
-Future<Void> genericCoroFailedActor() {
-	return operation_failed();
-}
-
 } // namespace
 
 TEST_CASE("/flow/genericactors/AsyncListener") {
@@ -422,83 +412,6 @@ TEST_CASE("/flow/genericcoros/Trigger") {
 	    wait(getVoidErrorCode(generic_coro::trigger(SetAsyncVarTrue{ called }, Future<Void>(operation_failed()))));
 	ASSERT_EQ(errorCode, error_code_operation_failed);
 	ASSERT(!called->get());
-
-	return Void();
-}
-
-TEST_CASE("/flow/genericcoros/ActorCollection/readyChildReturnsWhenEmptied") {
-	state PromiseStream<Future<Void>> addActor;
-	state int count = 0;
-	state Future<Void> collection =
-	    generic_coro::actorCollection(addActor.getFuture(), &count, nullptr, nullptr, nullptr, true);
-
-	addActor.send(Void());
-	wait(collection);
-	ASSERT_EQ(count, 0);
-
-	return Void();
-}
-
-TEST_CASE("/flow/genericcoros/ActorCollection/readyChildWhileNonEmpty") {
-	state PromiseStream<Future<Void>> addActor;
-	state Promise<Void> pending;
-	state int count = 0;
-	state Future<Void> collection =
-	    generic_coro::actorCollection(addActor.getFuture(), &count, nullptr, nullptr, nullptr, true);
-
-	addActor.send(pending.getFuture());
-	wait(delay(0));
-	ASSERT_EQ(count, 1);
-
-	addActor.send(Void());
-	wait(delay(0));
-	ASSERT_EQ(count, 1);
-	ASSERT(!collection.isReady());
-
-	pending.send(Void());
-	wait(collection);
-	ASSERT_EQ(count, 0);
-
-	return Void();
-}
-
-TEST_CASE("/flow/genericcoros/ActorCollection/errorPropagation") {
-	state generic_coro::ActorCollection actorCollection(false);
-
-	actorCollection.add(genericCoroFailedActor());
-	int errorCode = wait(getVoidErrorCode(actorCollection.getResult()));
-	ASSERT_EQ(errorCode, error_code_operation_failed);
-
-	return Void();
-}
-
-TEST_CASE("/flow/genericcoros/ActorCollection/clearCancelsChildren") {
-	state generic_coro::ActorCollection actorCollection(false);
-	state int actors = deterministicRandom()->randomInt(1, 1000);
-	for (int i = 0; i < actors; i++) {
-		actorCollection.add(genericCoroFailIfNotCancelled());
-	}
-
-	actorCollection.clear(false);
-	wait(delay(0));
-
-	return Void();
-}
-
-TEST_CASE("/flow/genericcoros/ActorCollection/resetCancelsQueuedChildrenAfterError") {
-	state generic_coro::ActorCollection actorCollection(false);
-	state int actors = deterministicRandom()->randomInt(1, 500);
-	for (int i = 0; i < actors; i++) {
-		actorCollection.add(genericCoroFailIfNotCancelled());
-	}
-
-	actorCollection.add(genericCoroFailedActor());
-	for (int i = 0; i < actors; i++) {
-		actorCollection.add(genericCoroFailIfNotCancelled());
-	}
-
-	actorCollection = generic_coro::ActorCollection(false);
-	wait(delay(0));
 
 	return Void();
 }

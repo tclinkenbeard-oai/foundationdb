@@ -23,7 +23,6 @@
 #include "flow/ActorCollection.h"
 #include "flow/ThreadHelper.actor.h"
 #include "flow/flow.h"
-#include "genericcoros.h"
 
 #include <cstdint>
 #include <vector>
@@ -46,25 +45,17 @@ Future<Void> cancellableFuture(Future<Void> signal, uint64_t* cleanupCount, uint
 	}
 }
 
-enum class ActorCollectionImpl { Actor, Coroutine };
-
-template <ActorCollectionImpl Impl>
 Future<Void> makeActorCollection(PromiseStream<Future<Void>>& addActor,
                                  int* count = nullptr,
                                  bool returnWhenEmptied = false) {
-	if constexpr (Impl == ActorCollectionImpl::Actor) {
-		return ::actorCollection(addActor.getFuture(), count, nullptr, nullptr, nullptr, returnWhenEmptied);
-	} else {
-		return generic_coro::actorCollection(addActor.getFuture(), count, nullptr, nullptr, nullptr, returnWhenEmptied);
-	}
+	return actorCollection(addActor.getFuture(), count, nullptr, nullptr, nullptr, returnWhenEmptied);
 }
 
-template <ActorCollectionImpl Impl>
 Future<Void> benchActorCollectionConstructCancel(benchmark::State* state) {
 	for (auto _ : *state) {
 		benchmark::DoNotOptimize(_);
 		PromiseStream<Future<Void>> addActor;
-		Future<Void> collection = makeActorCollection<Impl>(addActor);
+		Future<Void> collection = makeActorCollection(addActor);
 		benchmark::DoNotOptimize(collection);
 		collection.cancel();
 		benchmark::DoNotOptimize(collection);
@@ -74,12 +65,11 @@ Future<Void> benchActorCollectionConstructCancel(benchmark::State* state) {
 	co_return;
 }
 
-template <ActorCollectionImpl Impl>
 Future<Void> benchActorCollectionReadyChild(benchmark::State* state) {
 	for (auto _ : *state) {
 		benchmark::DoNotOptimize(_);
 		PromiseStream<Future<Void>> addActor;
-		Future<Void> collection = makeActorCollection<Impl>(addActor, nullptr, true);
+		Future<Void> collection = makeActorCollection(addActor, nullptr, true);
 		addActor.send(Future<Void>(Void()));
 		co_await collection;
 		benchmark::DoNotOptimize(collection);
@@ -88,12 +78,11 @@ Future<Void> benchActorCollectionReadyChild(benchmark::State* state) {
 	co_return;
 }
 
-template <ActorCollectionImpl Impl>
 Future<Void> benchActorCollectionErrorChild(benchmark::State* state) {
 	for (auto _ : *state) {
 		benchmark::DoNotOptimize(_);
 		PromiseStream<Future<Void>> addActor;
-		Future<Void> collection = makeActorCollection<Impl>(addActor);
+		Future<Void> collection = makeActorCollection(addActor);
 		addActor.send(Future<Void>(operation_failed()));
 		try {
 			co_await collection;
@@ -107,7 +96,6 @@ Future<Void> benchActorCollectionErrorChild(benchmark::State* state) {
 	co_return;
 }
 
-template <ActorCollectionImpl Impl>
 Future<Void> benchActorCollectionBatchComplete(benchmark::State* state) {
 	const int batchSize = state->range(0);
 
@@ -115,7 +103,7 @@ Future<Void> benchActorCollectionBatchComplete(benchmark::State* state) {
 		benchmark::DoNotOptimize(_);
 		PromiseStream<Future<Void>> addActor;
 		int count = 0;
-		Future<Void> collection = makeActorCollection<Impl>(addActor, &count, true);
+		Future<Void> collection = makeActorCollection(addActor, &count, true);
 
 		std::vector<Promise<Void>> signals(batchSize);
 		for (auto& signal : signals) {
@@ -137,7 +125,6 @@ Future<Void> benchActorCollectionBatchComplete(benchmark::State* state) {
 	co_return;
 }
 
-template <ActorCollectionImpl Impl>
 Future<Void> benchActorCollectionBatchCancel(benchmark::State* state) {
 	const int batchSize = state->range(0);
 	uint64_t cleanupCount = 0;
@@ -149,7 +136,7 @@ Future<Void> benchActorCollectionBatchCancel(benchmark::State* state) {
 		state->PauseTiming();
 		PromiseStream<Future<Void>> addActor;
 		int count = 0;
-		Future<Void> collection = makeActorCollection<Impl>(addActor, &count);
+		Future<Void> collection = makeActorCollection(addActor, &count);
 		std::vector<Promise<Void>> signals(batchSize);
 		for (auto& signal : signals) {
 			addActor.send(cancellableFuture(signal.getFuture(), &cleanupCount, &cancelledCount));
@@ -176,72 +163,39 @@ Future<Void> benchActorCollectionBatchCancel(benchmark::State* state) {
 	co_return;
 }
 
-template <ActorCollectionImpl Impl>
 void bench_actorCollection_construct_cancel(benchmark::State& state) {
-	onMainThread([&state] { return benchActorCollectionConstructCancel<Impl>(&state); }).blockUntilReady();
+	onMainThread([&state] { return benchActorCollectionConstructCancel(&state); }).blockUntilReady();
 }
 
-template <ActorCollectionImpl Impl>
 void bench_actorCollection_ready_child(benchmark::State& state) {
-	onMainThread([&state] { return benchActorCollectionReadyChild<Impl>(&state); }).blockUntilReady();
+	onMainThread([&state] { return benchActorCollectionReadyChild(&state); }).blockUntilReady();
 }
 
-template <ActorCollectionImpl Impl>
 void bench_actorCollection_error_child(benchmark::State& state) {
-	onMainThread([&state] { return benchActorCollectionErrorChild<Impl>(&state); }).blockUntilReady();
+	onMainThread([&state] { return benchActorCollectionErrorChild(&state); }).blockUntilReady();
 }
 
-template <ActorCollectionImpl Impl>
 void bench_actorCollection_batch_complete(benchmark::State& state) {
-	onMainThread([&state] { return benchActorCollectionBatchComplete<Impl>(&state); }).blockUntilReady();
+	onMainThread([&state] { return benchActorCollectionBatchComplete(&state); }).blockUntilReady();
 }
 
-template <ActorCollectionImpl Impl>
 void bench_actorCollection_batch_cancel(benchmark::State& state) {
-	onMainThread([&state] { return benchActorCollectionBatchCancel<Impl>(&state); }).blockUntilReady();
+	onMainThread([&state] { return benchActorCollectionBatchCancel(&state); }).blockUntilReady();
 }
 
-BENCHMARK_TEMPLATE(bench_actorCollection_construct_cancel, ActorCollectionImpl::Actor)
-    ->Name("ActorCollection/actor/construct_cancel")
-    ->ReportAggregatesOnly(true);
+BENCHMARK(bench_actorCollection_construct_cancel)->Name("ActorCollection/construct_cancel")->ReportAggregatesOnly(true);
 
-BENCHMARK_TEMPLATE(bench_actorCollection_construct_cancel, ActorCollectionImpl::Coroutine)
-    ->Name("ActorCollection/coroutine/construct_cancel")
-    ->ReportAggregatesOnly(true);
+BENCHMARK(bench_actorCollection_ready_child)->Name("ActorCollection/ready_child")->ReportAggregatesOnly(true);
 
-BENCHMARK_TEMPLATE(bench_actorCollection_ready_child, ActorCollectionImpl::Actor)
-    ->Name("ActorCollection/actor/ready_child")
-    ->ReportAggregatesOnly(true);
+BENCHMARK(bench_actorCollection_error_child)->Name("ActorCollection/error_child")->ReportAggregatesOnly(true);
 
-BENCHMARK_TEMPLATE(bench_actorCollection_ready_child, ActorCollectionImpl::Coroutine)
-    ->Name("ActorCollection/coroutine/ready_child")
-    ->ReportAggregatesOnly(true);
-
-BENCHMARK_TEMPLATE(bench_actorCollection_error_child, ActorCollectionImpl::Actor)
-    ->Name("ActorCollection/actor/error_child")
-    ->ReportAggregatesOnly(true);
-
-BENCHMARK_TEMPLATE(bench_actorCollection_error_child, ActorCollectionImpl::Coroutine)
-    ->Name("ActorCollection/coroutine/error_child")
-    ->ReportAggregatesOnly(true);
-
-BENCHMARK_TEMPLATE(bench_actorCollection_batch_complete, ActorCollectionImpl::Actor)
-    ->Name("ActorCollection/actor/batch_complete")
+BENCHMARK(bench_actorCollection_batch_complete)
+    ->Name("ActorCollection/batch_complete")
     ->Range(1, 1 << 12)
     ->ReportAggregatesOnly(true);
 
-BENCHMARK_TEMPLATE(bench_actorCollection_batch_complete, ActorCollectionImpl::Coroutine)
-    ->Name("ActorCollection/coroutine/batch_complete")
-    ->Range(1, 1 << 12)
-    ->ReportAggregatesOnly(true);
-
-BENCHMARK_TEMPLATE(bench_actorCollection_batch_cancel, ActorCollectionImpl::Actor)
-    ->Name("ActorCollection/actor/batch_cancel")
-    ->Range(1, 1 << 12)
-    ->ReportAggregatesOnly(true);
-
-BENCHMARK_TEMPLATE(bench_actorCollection_batch_cancel, ActorCollectionImpl::Coroutine)
-    ->Name("ActorCollection/coroutine/batch_cancel")
+BENCHMARK(bench_actorCollection_batch_cancel)
+    ->Name("ActorCollection/batch_cancel")
     ->Range(1, 1 << 12)
     ->ReportAggregatesOnly(true);
 
