@@ -416,6 +416,10 @@ struct ActorCollectionEventAwaitable {
 			finish(Event::error(e));
 		}
 		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 2, Error>*, Error e) { fail(e); }
+
+#ifdef ENABLE_SAMPLING
+		LineageReference* lineageAddr() { return currentLineage; }
+#endif
 	};
 
 	template <class PromiseType>
