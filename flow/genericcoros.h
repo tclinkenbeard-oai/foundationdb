@@ -23,6 +23,7 @@
 #include "flow/Coroutines.h"
 #include "flow/flow.h"
 
+#include <boost/intrusive/list.hpp>
 #include <vector>
 
 namespace generic_coro {
@@ -211,5 +212,174 @@ template <class T, class X>
 Future<Void> store(X& out, Future<T> what) {
 	out = co_await what;
 }
+
+namespace actor_collection_detail {
+
+struct Runner : public boost::intrusive::list_base_hook<>, FastAllocated<Runner>, NonCopyable {
+	Future<Void> handler;
+};
+
+using RunnerList = boost::intrusive::list<Runner, boost::intrusive::constant_time_size<false>>;
+
+struct RunnerListDestroyer : NonCopyable {
+	explicit RunnerListDestroyer(RunnerList* list) : list(list) {}
+
+	~RunnerListDestroyer() {
+		list->clear_and_dispose([](Runner* r) { delete r; });
+	}
+
+	RunnerList* list;
+};
+
+inline Future<Void> runnerHandler(PromiseStream<RunnerList::iterator> output,
+                                  PromiseStream<Error> errors,
+                                  Future<Void> task,
+                                  RunnerList::iterator runner) {
+	try {
+		co_await task;
+		output.send(runner);
+	} catch (Error& e) {
+		if (e.code() == error_code_actor_cancelled) {
+			throw;
+		}
+		errors.send(e);
+	}
+}
+
+inline Future<Void> actorCollectionImpl(FutureStream<Future<Void>> addActor,
+                                        int* pCount,
+                                        double* lastChangeTime,
+                                        double* idleTime,
+                                        double* allTime,
+                                        bool returnWhenEmptied) {
+	RunnerList runners;
+	RunnerListDestroyer runnersDestroyer(&runners);
+	PromiseStream<RunnerList::iterator> complete;
+	PromiseStream<Error> errors;
+	int count = 0;
+	if (!pCount) {
+		pCount = &count;
+	}
+
+	while (true) {
+		auto result = co_await race(addActor, complete.getFuture(), errors.getFuture());
+		if (result.index() == 0) {
+			Future<Void> f = std::get<0>(std::move(result));
+			auto i = runners.insert(runners.end(), *new Runner());
+			Future<Void> handler = runnerHandler(complete, errors, f, i);
+			i->handler = handler;
+
+			++*pCount;
+			if (*pCount == 1 && lastChangeTime && idleTime && allTime) {
+				double currentTime = now();
+				*idleTime += currentTime - *lastChangeTime;
+				*allTime += currentTime - *lastChangeTime;
+				*lastChangeTime = currentTime;
+			}
+		} else if (result.index() == 1) {
+			auto i = std::get<1>(std::move(result));
+			if (!--*pCount) {
+				if (lastChangeTime && idleTime && allTime) {
+					double currentTime = now();
+					*allTime += currentTime - *lastChangeTime;
+					*lastChangeTime = currentTime;
+				}
+				if (returnWhenEmptied) {
+					co_return;
+				}
+			}
+			runners.erase_and_dispose(i, [](Runner* r) { delete r; });
+		} else {
+			throw std::get<2>(std::move(result));
+		}
+	}
+}
+
+} // namespace actor_collection_detail
+
+inline Future<Void> actorCollection(FutureStream<Future<Void>> const& addActor,
+                                    int* const& optionalCountPtr = nullptr,
+                                    double* const& lastChangeTime = nullptr,
+                                    double* const& idleTime = nullptr,
+                                    double* const& allTime = nullptr,
+                                    bool const& returnWhenEmptied = false) {
+	return actor_collection_detail::actorCollectionImpl(
+	    addActor, optionalCountPtr, lastChangeTime, idleTime, allTime, returnWhenEmptied);
+}
+
+struct ActorCollectionNoErrors : NonCopyable {
+private:
+	Future<Void> m_ac;
+	PromiseStream<Future<Void>> m_add;
+	int m_size;
+	void init() {
+		m_size = 0;
+		m_ac = generic_coro::actorCollection(m_add.getFuture(), &m_size);
+	}
+
+public:
+	ActorCollectionNoErrors() { init(); }
+	void clear() {
+		m_ac = Future<Void>();
+		init();
+	}
+	void add(Future<Void> actor) { m_add.send(actor); }
+	int size() const { return m_size; }
+};
+
+class ActorCollection : NonCopyable {
+	PromiseStream<Future<Void>> m_add;
+	Future<Void> m_out;
+
+public:
+	explicit ActorCollection(bool returnWhenEmptied = false) {
+		m_out = generic_coro::actorCollection(m_add.getFuture(), nullptr, nullptr, nullptr, nullptr, returnWhenEmptied);
+	}
+
+	void add(Future<Void> a) { m_add.send(a); }
+	Future<Void> getResult() const { return m_out; }
+	void clear(bool returnWhenEmptied) {
+		m_out.cancel();
+		m_out = generic_coro::actorCollection(m_add.getFuture(), nullptr, nullptr, nullptr, nullptr, returnWhenEmptied);
+	}
+};
+
+class SignalableActorCollection : NonCopyable {
+	PromiseStream<Future<Void>> m_add;
+	Promise<Void> stopSignal;
+	Future<Void> m_out;
+
+	void init() {
+		PromiseStream<Future<Void>> addStream;
+		m_out = generic_coro::actorCollection(addStream.getFuture(), nullptr, nullptr, nullptr, nullptr, true);
+		m_add = addStream;
+		stopSignal = Promise<Void>();
+		m_add.send(stopSignal.getFuture());
+	}
+
+public:
+	explicit SignalableActorCollection() { init(); }
+
+	Future<Void> signal() {
+		stopSignal.send(Void());
+		Future<Void> result = generic_coro::holdWhile(m_add, m_out);
+		return result;
+	}
+
+	Future<Void> signalAndReset() {
+		Future<Void> result = signal();
+		clear();
+		return result;
+	}
+
+	Future<Void> signalAndCollapse() {
+		Future<Void> result = signalAndReset();
+		add(result);
+		return result;
+	}
+
+	void add(Future<Void> a) { m_add.send(a); }
+	void clear() { init(); }
+};
 
 } // namespace generic_coro
