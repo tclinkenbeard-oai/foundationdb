@@ -248,93 +248,147 @@ struct Event {
 	static Event error(Error err) { return Event{ Kind::Error, Future<Void>(), RunnerList::iterator(), err }; }
 };
 
-struct EventActor final : Actor<Event>,
-                          ActorSingleCallback<EventActor, 0, Future<Void>>,
-                          ActorSingleCallback<EventActor, 1, RunnerList::iterator>,
-                          ActorSingleCallback<EventActor, 2, Error>,
-                          FastAllocated<EventActor> {
+struct ActorCollectionEventAwaitable {
+	using PromiseBoundAwaitableTag = void;
+
 	FutureStream<Future<Void>> addActor;
 	FutureStream<RunnerList::iterator> complete;
 	FutureStream<Error> errors;
 
-	using FastAllocated<EventActor>::operator new;
-	using FastAllocated<EventActor>::operator delete;
+	ActorCollectionEventAwaitable(FutureStream<Future<Void>> addActor,
+	                              FutureStream<RunnerList::iterator> complete,
+	                              FutureStream<Error> errors)
+	  : addActor(std::move(addActor)), complete(std::move(complete)), errors(std::move(errors)) {}
 
-	EventActor(FutureStream<Future<Void>> addActor,
-	           FutureStream<RunnerList::iterator> complete,
-	           FutureStream<Error> errors)
-	  : addActor(std::move(addActor)), complete(std::move(complete)), errors(std::move(errors)) {
-		this->actor_wait_state = ACTOR_WAIT_STATE_WAITING;
+	template <class PromiseType>
+	struct Bound final : ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>,
+	                     ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>,
+	                     ActorSingleCallback<Bound<PromiseType>, 2, Error>,
+	                     coro::AwaitCancelHandler {
+		FutureStream<Future<Void>> addActor;
+		FutureStream<RunnerList::iterator> complete;
+		FutureStream<Error> errors;
+		PromiseType* pt = nullptr;
+		Event event;
+		bool callbacksRegistered = false;
 
-		auto addActorStream = this->addActor;
-		addActorStream.addCallbackAndClear(static_cast<ActorSingleCallback<EventActor, 0, Future<Void>>*>(this));
-		auto completeStream = this->complete;
-		completeStream.addCallbackAndClear(
-		    static_cast<ActorSingleCallback<EventActor, 1, RunnerList::iterator>*>(this));
-		auto errorsStream = this->errors;
-		errorsStream.addCallbackAndClear(static_cast<ActorSingleCallback<EventActor, 2, Error>*>(this));
-	}
+		Bound(FutureStream<Future<Void>> addActor,
+		      FutureStream<RunnerList::iterator> complete,
+		      FutureStream<Error> errors,
+		      PromiseType* pt)
+		  : addActor(std::move(addActor)), complete(std::move(complete)), errors(std::move(errors)), pt(pt) {}
 
-	void removeCallbacks() {
-		static_cast<ActorSingleCallback<EventActor, 0, Future<Void>>*>(this)->remove();
-		static_cast<ActorSingleCallback<EventActor, 1, RunnerList::iterator>*>(this)->remove();
-		static_cast<ActorSingleCallback<EventActor, 2, Error>*>(this)->remove();
-	}
-
-	void finish(Event event) {
-		this->actor_wait_state = ACTOR_WAIT_STATE_NOT_WAITING;
-		removeCallbacks();
-		this->SAV<Event>::sendAndDelPromiseRef(std::move(event));
-	}
-
-	void fail(Error e) {
-		this->actor_wait_state = ACTOR_WAIT_STATE_NOT_WAITING;
-		removeCallbacks();
-		this->SAV<Event>::sendErrorAndDelPromiseRef(e);
-	}
-
-	void a_callback_fire(ActorSingleCallback<EventActor, 0, Future<Void>>*, Future<Void> const& actor) {
-		finish(Event::add(actor));
-	}
-	void a_callback_fire(ActorSingleCallback<EventActor, 0, Future<Void>>*, Future<Void>&& actor) {
-		finish(Event::add(std::move(actor)));
-	}
-	void a_callback_error(ActorSingleCallback<EventActor, 0, Future<Void>>*, Error e) { fail(e); }
-
-	void a_callback_fire(ActorSingleCallback<EventActor, 1, RunnerList::iterator>*,
-	                     RunnerList::iterator const& runner) {
-		finish(Event::complete(runner));
-	}
-	void a_callback_error(ActorSingleCallback<EventActor, 1, RunnerList::iterator>*, Error e) { fail(e); }
-
-	void a_callback_fire(ActorSingleCallback<EventActor, 2, Error>*, Error const& e) { finish(Event::error(e)); }
-	void a_callback_error(ActorSingleCallback<EventActor, 2, Error>*, Error e) { fail(e); }
-
-	void cancel() override {
-		const auto waitState = this->actor_wait_state;
-		this->actor_wait_state = ACTOR_WAIT_STATE_CANCELLED;
-		if (actorWaitStateIsWaiting(waitState)) {
-			removeCallbacks();
-			this->SAV<Event>::sendErrorAndDelPromiseRef(actor_cancelled());
+		bool await_ready() {
+			if (actorWaitStateIsCancelled(pt->waitState())) {
+				pt->waitState() = ACTOR_WAIT_STATE_CANCELLED_DURING_READY_CHECK;
+				return true;
+			}
+			return setReadyEvent();
 		}
-	}
 
-	void destroy() override { delete this; }
+		void await_suspend(n_coroutine::coroutine_handle<> h) {
+			pt->setHandle(h);
+			pt->waitState() = ACTOR_WAIT_STATE_WAITING;
+			registerCallbacks();
+			pt->setCancelHandler(this);
+		}
+
+		Event await_resume() {
+			pt->clearCancelHandler(this);
+			switch (pt->waitState()) {
+			case ACTOR_WAIT_STATE_CANCELLED:
+				cancelWait();
+			case ACTOR_WAIT_STATE_CANCELLED_DURING_READY_CHECK:
+				throw actor_cancelled();
+			}
+
+			if (actorWaitStateIsWaiting(pt->waitState())) {
+				removeCallbacks();
+				pt->waitState() = ACTOR_WAIT_STATE_NOT_WAITING;
+			}
+			return std::move(event);
+		}
+
+		void cancelWait() override { removeCallbacks(); }
+
+		bool setReadyEvent() {
+			if (addActor.isReady()) {
+				event = Event::add(addActor.pop());
+				return true;
+			}
+			if (complete.isReady()) {
+				event = Event::complete(complete.pop());
+				return true;
+			}
+			if (errors.isReady()) {
+				event = Event::error(errors.pop());
+				return true;
+			}
+			return false;
+		}
+
+		void registerCallbacks() {
+			callbacksRegistered = true;
+			auto addActorStream = addActor;
+			addActorStream.addCallbackAndClear(
+			    static_cast<ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*>(this));
+			auto completeStream = complete;
+			completeStream.addCallbackAndClear(
+			    static_cast<ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>*>(this));
+			auto errorsStream = errors;
+			errorsStream.addCallbackAndClear(static_cast<ActorSingleCallback<Bound<PromiseType>, 2, Error>*>(this));
+		}
+
+		void removeCallbacks() {
+			if (!callbacksRegistered) {
+				return;
+			}
+			callbacksRegistered = false;
+			static_cast<ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*>(this)->remove();
+			static_cast<ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>*>(this)->remove();
+			static_cast<ActorSingleCallback<Bound<PromiseType>, 2, Error>*>(this)->remove();
+		}
+
+		void finish(Event readyEvent) {
+			event = std::move(readyEvent);
+			pt->resume();
+		}
+
+		void fail(Error e) {
+			event = Event::error(e);
+			pt->resume();
+		}
+
+		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*, Future<Void> const& actor) {
+			finish(Event::add(actor));
+		}
+		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*, Future<Void>&& actor) {
+			finish(Event::add(std::move(actor)));
+		}
+		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*, Error e) { fail(e); }
+
+		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>*,
+		                     RunnerList::iterator const& runner) {
+			finish(Event::complete(runner));
+		}
+		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>*, Error e) { fail(e); }
+
+		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 2, Error>*, Error const& e) {
+			finish(Event::error(e));
+		}
+		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 2, Error>*, Error e) { fail(e); }
+	};
+
+	template <class PromiseType>
+	Bound<PromiseType> bindPromise(PromiseType* pt) && {
+		return Bound<PromiseType>(std::move(addActor), std::move(complete), std::move(errors), pt);
+	}
 };
 
-inline Future<Event> actorCollectionEvent(FutureStream<Future<Void>> addActor,
-                                          FutureStream<RunnerList::iterator> complete,
-                                          FutureStream<Error> errors) {
-	if (addActor.isReady()) {
-		return Event::add(addActor.pop());
-	}
-	if (complete.isReady()) {
-		return Event::complete(complete.pop());
-	}
-	if (errors.isReady()) {
-		return Event::error(errors.pop());
-	}
-	return Future<Event>(new EventActor(std::move(addActor), std::move(complete), std::move(errors)));
+inline ActorCollectionEventAwaitable actorCollectionEvent(FutureStream<Future<Void>> addActor,
+                                                          FutureStream<RunnerList::iterator> complete,
+                                                          FutureStream<Error> errors) {
+	return ActorCollectionEventAwaitable(std::move(addActor), std::move(complete), std::move(errors));
 }
 
 inline Future<Void> runnerHandler(PromiseStream<RunnerList::iterator> output,

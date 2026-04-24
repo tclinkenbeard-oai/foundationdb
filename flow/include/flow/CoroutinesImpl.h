@@ -45,6 +45,12 @@ struct AwaitCancelHandler {
 	virtual void cancelWait() = 0;
 };
 
+template <class T, class = void>
+struct IsPromiseBoundAwaitable : std::false_type {};
+
+template <class T>
+struct IsPromiseBoundAwaitable<T, std::void_t<typename T::PromiseBoundAwaitableTag>> : std::true_type {};
+
 template <class F>
 struct FutureReturnType;
 
@@ -945,6 +951,14 @@ struct CoroPromiseBase : CoroReturn<T, Derived, ReturnsExplicitVoid> {
 	template <class U>
 	auto await_transform(const ThreadFutureStream<U>& futureStream) {
 		return coro::ThreadAwaitableFutureStream<promise_type, U, ReturnsExplicitVoid>{ futureStream, self() };
+	}
+
+	template <class Awaitable>
+	auto await_transform(Awaitable&& awaitable)
+	    requires(coro::IsPromiseBoundAwaitable<std::remove_cvref_t<Awaitable>>::value &&
+	             requires(Awaitable&& a, promise_type* p) { std::forward<Awaitable>(a).bindPromise(p); })
+	{
+		return std::forward<Awaitable>(awaitable).bindPromise(self());
 	}
 };
 
