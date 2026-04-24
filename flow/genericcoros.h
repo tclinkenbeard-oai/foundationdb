@@ -215,8 +215,53 @@ Future<Void> store(X& out, Future<T> what) {
 
 namespace actor_collection_detail {
 
-struct Runner : public boost::intrusive::list_base_hook<>, FastAllocated<Runner>, NonCopyable {
-	Future<Void> handler;
+struct Runner : public boost::intrusive::list_base_hook<>, Callback<Void>, FastAllocated<Runner>, NonCopyable {
+	PromiseStream<Runner*> output;
+	PromiseStream<Error> errors;
+	bool callbackRegistered = false;
+
+	Runner(PromiseStream<Runner*> output, PromiseStream<Error> errors)
+	  : output(std::move(output)), errors(std::move(errors)) {}
+
+	~Runner() { removeCallback(); }
+
+	void start(Future<Void> task) {
+		if (task.isReady()) {
+			if (task.isError()) {
+				Error e = task.getError();
+				if (e.code() != error_code_actor_cancelled) {
+					errors.send(e);
+				}
+			} else {
+				output.send(this);
+			}
+			return;
+		}
+
+		callbackRegistered = true;
+		task.addCallbackAndClear(this);
+	}
+
+	void removeCallback() {
+		if (callbackRegistered) {
+			callbackRegistered = false;
+			Callback<Void>::remove();
+		}
+	}
+
+	void fire(Void const&) override {
+		auto output = this->output;
+		removeCallback();
+		output.send(this);
+	}
+
+	void error(Error e) override {
+		auto errors = this->errors;
+		removeCallback();
+		if (e.code() != error_code_actor_cancelled) {
+			errors.send(e);
+		}
+	}
 };
 
 using RunnerList = boost::intrusive::list<Runner, boost::intrusive::constant_time_size<false>>;
@@ -236,44 +281,40 @@ struct Event {
 
 	Kind kind;
 	Future<Void> actor;
-	RunnerList::iterator runner;
+	Runner* runner;
 	Error err;
 
-	static Event add(Future<Void> actor) {
-		return Event{ Kind::Add, std::move(actor), RunnerList::iterator(), Error() };
-	}
-	static Event complete(RunnerList::iterator runner) {
-		return Event{ Kind::Complete, Future<Void>(), runner, Error() };
-	}
-	static Event error(Error err) { return Event{ Kind::Error, Future<Void>(), RunnerList::iterator(), err }; }
+	static Event add(Future<Void> actor) { return Event{ Kind::Add, std::move(actor), nullptr, Error() }; }
+	static Event complete(Runner* runner) { return Event{ Kind::Complete, Future<Void>(), runner, Error() }; }
+	static Event error(Error err) { return Event{ Kind::Error, Future<Void>(), nullptr, err }; }
 };
 
 struct ActorCollectionEventAwaitable {
 	using PromiseBoundAwaitableTag = void;
 
 	FutureStream<Future<Void>> addActor;
-	FutureStream<RunnerList::iterator> complete;
+	FutureStream<Runner*> complete;
 	FutureStream<Error> errors;
 
 	ActorCollectionEventAwaitable(FutureStream<Future<Void>> addActor,
-	                              FutureStream<RunnerList::iterator> complete,
+	                              FutureStream<Runner*> complete,
 	                              FutureStream<Error> errors)
 	  : addActor(std::move(addActor)), complete(std::move(complete)), errors(std::move(errors)) {}
 
 	template <class PromiseType>
 	struct Bound final : ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>,
-	                     ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>,
+	                     ActorSingleCallback<Bound<PromiseType>, 1, Runner*>,
 	                     ActorSingleCallback<Bound<PromiseType>, 2, Error>,
 	                     coro::AwaitCancelHandler {
 		FutureStream<Future<Void>> addActor;
-		FutureStream<RunnerList::iterator> complete;
+		FutureStream<Runner*> complete;
 		FutureStream<Error> errors;
 		PromiseType* pt = nullptr;
 		Event event;
 		bool callbacksRegistered = false;
 
 		Bound(FutureStream<Future<Void>> addActor,
-		      FutureStream<RunnerList::iterator> complete,
+		      FutureStream<Runner*> complete,
 		      FutureStream<Error> errors,
 		      PromiseType* pt)
 		  : addActor(std::move(addActor)), complete(std::move(complete)), errors(std::move(errors)), pt(pt) {}
@@ -333,8 +374,7 @@ struct ActorCollectionEventAwaitable {
 			addActorStream.addCallbackAndClear(
 			    static_cast<ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*>(this));
 			auto completeStream = complete;
-			completeStream.addCallbackAndClear(
-			    static_cast<ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>*>(this));
+			completeStream.addCallbackAndClear(static_cast<ActorSingleCallback<Bound<PromiseType>, 1, Runner*>*>(this));
 			auto errorsStream = errors;
 			errorsStream.addCallbackAndClear(static_cast<ActorSingleCallback<Bound<PromiseType>, 2, Error>*>(this));
 		}
@@ -345,7 +385,7 @@ struct ActorCollectionEventAwaitable {
 			}
 			callbacksRegistered = false;
 			static_cast<ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*>(this)->remove();
-			static_cast<ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>*>(this)->remove();
+			static_cast<ActorSingleCallback<Bound<PromiseType>, 1, Runner*>*>(this)->remove();
 			static_cast<ActorSingleCallback<Bound<PromiseType>, 2, Error>*>(this)->remove();
 		}
 
@@ -367,11 +407,10 @@ struct ActorCollectionEventAwaitable {
 		}
 		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*, Error e) { fail(e); }
 
-		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>*,
-		                     RunnerList::iterator const& runner) {
+		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 1, Runner*>*, Runner* const& runner) {
 			finish(Event::complete(runner));
 		}
-		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 1, RunnerList::iterator>*, Error e) { fail(e); }
+		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 1, Runner*>*, Error e) { fail(e); }
 
 		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 2, Error>*, Error const& e) {
 			finish(Event::error(e));
@@ -386,24 +425,9 @@ struct ActorCollectionEventAwaitable {
 };
 
 inline ActorCollectionEventAwaitable actorCollectionEvent(FutureStream<Future<Void>> addActor,
-                                                          FutureStream<RunnerList::iterator> complete,
+                                                          FutureStream<Runner*> complete,
                                                           FutureStream<Error> errors) {
 	return ActorCollectionEventAwaitable(std::move(addActor), std::move(complete), std::move(errors));
-}
-
-inline Future<Void> runnerHandler(PromiseStream<RunnerList::iterator> output,
-                                  PromiseStream<Error> errors,
-                                  Future<Void> task,
-                                  RunnerList::iterator runner) {
-	try {
-		co_await task;
-		output.send(runner);
-	} catch (Error& e) {
-		if (e.code() == error_code_actor_cancelled) {
-			throw;
-		}
-		errors.send(e);
-	}
 }
 
 inline Future<Void> actorCollectionNonEmptyImpl(FutureStream<Future<Void>> addActor,
@@ -415,7 +439,7 @@ inline Future<Void> actorCollectionNonEmptyImpl(FutureStream<Future<Void>> addAc
                                                 bool returnWhenEmptied) {
 	RunnerList runners;
 	RunnerListDestroyer runnersDestroyer(&runners);
-	PromiseStream<RunnerList::iterator> complete;
+	PromiseStream<Runner*> complete;
 	PromiseStream<Error> errors;
 	int count = 0;
 	if (!pCount) {
@@ -423,9 +447,8 @@ inline Future<Void> actorCollectionNonEmptyImpl(FutureStream<Future<Void>> addAc
 	}
 
 	auto addRunner = [&](Future<Void> f) {
-		auto i = runners.insert(runners.end(), *new Runner());
-		Future<Void> handler = runnerHandler(complete, errors, std::move(f), i);
-		i->handler = handler;
+		auto i = runners.insert(runners.end(), *new Runner(complete, errors));
+		i->start(std::move(f));
 
 		++*pCount;
 		if (*pCount == 1 && lastChangeTime && idleTime && allTime) {
@@ -493,7 +516,7 @@ inline Future<Void> actorCollectionNonEmptyImpl(FutureStream<Future<Void>> addAc
 		if (event.kind == Event::Kind::Add) {
 			addRunner(std::move(event.actor));
 		} else if (event.kind == Event::Kind::Complete) {
-			auto i = event.runner;
+			Runner* runner = event.runner;
 			if (!--*pCount) {
 				if (lastChangeTime && idleTime && allTime) {
 					double currentTime = now();
@@ -504,7 +527,7 @@ inline Future<Void> actorCollectionNonEmptyImpl(FutureStream<Future<Void>> addAc
 					co_return;
 				}
 			}
-			runners.erase_and_dispose(i, [](Runner* r) { delete r; });
+			runners.erase_and_dispose(runners.iterator_to(*runner), [](Runner* r) { delete r; });
 		} else {
 			throw event.err;
 		}
