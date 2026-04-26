@@ -116,9 +116,9 @@ struct ActorCollectionEventAwaitable {
 	  : addActor(std::move(addActor)), complete(std::move(complete)), errors(std::move(errors)) {}
 
 	template <class PromiseType>
-	struct Bound final : ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>,
-	                     ActorSingleCallback<Bound<PromiseType>, 1, Runner*>,
-	                     ActorSingleCallback<Bound<PromiseType>, 2, Error>,
+	struct Bound final : SingleCallback<Future<Void>>,
+	                     SingleCallback<Runner*>,
+	                     SingleCallback<Error>,
 	                     coro::AwaitCancelHandler {
 		FutureStream<Future<Void>> addActor;
 		FutureStream<Runner*> complete;
@@ -185,12 +185,11 @@ struct ActorCollectionEventAwaitable {
 		void registerCallbacks() {
 			callbacksRegistered = true;
 			auto addActorStream = addActor;
-			addActorStream.addCallbackAndClear(
-			    static_cast<ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*>(this));
+			addActorStream.addCallbackAndClear(static_cast<SingleCallback<Future<Void>>*>(this));
 			auto completeStream = complete;
-			completeStream.addCallbackAndClear(static_cast<ActorSingleCallback<Bound<PromiseType>, 1, Runner*>*>(this));
+			completeStream.addCallbackAndClear(static_cast<SingleCallback<Runner*>*>(this));
 			auto errorsStream = errors;
-			errorsStream.addCallbackAndClear(static_cast<ActorSingleCallback<Bound<PromiseType>, 2, Error>*>(this));
+			errorsStream.addCallbackAndClear(static_cast<SingleCallback<Error>*>(this));
 		}
 
 		void removeCallbacks() {
@@ -198,9 +197,9 @@ struct ActorCollectionEventAwaitable {
 				return;
 			}
 			callbacksRegistered = false;
-			static_cast<ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*>(this)->remove();
-			static_cast<ActorSingleCallback<Bound<PromiseType>, 1, Runner*>*>(this)->remove();
-			static_cast<ActorSingleCallback<Bound<PromiseType>, 2, Error>*>(this)->remove();
+			static_cast<SingleCallback<Future<Void>>*>(this)->remove();
+			static_cast<SingleCallback<Runner*>*>(this)->remove();
+			static_cast<SingleCallback<Error>*>(this)->remove();
 		}
 
 		void finish(Event readyEvent) {
@@ -213,27 +212,50 @@ struct ActorCollectionEventAwaitable {
 			pt->resume();
 		}
 
-		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*, Future<Void> const& actor) {
+		void fire(Future<Void> const& actor) override {
+#ifdef ENABLE_SAMPLING
+			LineageScope _(currentLineage);
+#endif
 			finish(Event::add(actor));
 		}
-		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*, Future<Void>&& actor) {
+		void fire(Future<Void>&& actor) override {
+#ifdef ENABLE_SAMPLING
+			LineageScope _(currentLineage);
+#endif
 			finish(Event::add(std::move(actor)));
 		}
-		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 0, Future<Void>>*, Error e) { fail(e); }
+		void error(Error e) override {
+#ifdef ENABLE_SAMPLING
+			LineageScope _(currentLineage);
+#endif
+			fail(e);
+		}
 
-		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 1, Runner*>*, Runner* const& runner) {
+		void fire(Runner* const& runner) override {
+#ifdef ENABLE_SAMPLING
+			LineageScope _(currentLineage);
+#endif
 			finish(Event::complete(runner));
 		}
-		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 1, Runner*>*, Error e) { fail(e); }
+		void fire(Runner*&& runner) override {
+#ifdef ENABLE_SAMPLING
+			LineageScope _(currentLineage);
+#endif
+			finish(Event::complete(runner));
+		}
 
-		void a_callback_fire(ActorSingleCallback<Bound<PromiseType>, 2, Error>*, Error const& e) {
+		void fire(Error const& e) override {
+#ifdef ENABLE_SAMPLING
+			LineageScope _(currentLineage);
+#endif
 			finish(Event::error(e));
 		}
-		void a_callback_error(ActorSingleCallback<Bound<PromiseType>, 2, Error>*, Error e) { fail(e); }
-
+		void fire(Error&& e) override {
 #ifdef ENABLE_SAMPLING
-		LineageReference* lineageAddr() { return currentLineage; }
+			LineageScope _(currentLineage);
 #endif
+			finish(Event::error(e));
+		}
 	};
 
 	template <class PromiseType>
