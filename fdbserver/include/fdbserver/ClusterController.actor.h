@@ -35,6 +35,7 @@
 #include "fdbrpc/Replication.h"
 #include "fdbrpc/ReplicationUtils.h"
 #include "fdbserver/BlobMigratorInterface.h"
+#include "fdbserver/ClusterHealthMonitor.h"
 #include "fdbserver/Knobs.h"
 #include "fdbserver/WorkerInterface.actor.h"
 #include "fdbrpc/Locality.h"
@@ -3396,6 +3397,8 @@ public:
 	std::vector<std::pair<RecruitBlobWorkerRequest, double>> outstandingBlobWorkerRequests;
 	ActorCollection ac;
 	UpdateWorkerList updateWorkerList;
+	Reference<cluster_health::WorkerEventProvider> clusterHealthWorkerEventProvider;
+	cluster_health::Monitor clusterHealthMonitor;
 	Future<Void> outstandingRequestChecker;
 	Future<Void> outstandingRemoteRequestChecker;
 	AsyncTrigger updateDBInfo;
@@ -3478,9 +3481,12 @@ public:
 	                      Reference<AsyncVar<Optional<UID>>> clusterId)
 	  : gotProcessClasses(false), gotFullyRecoveredConfig(false), shouldCommitSuicide(false),
 	    clusterControllerProcessId(locality.processId()), clusterControllerDcId(locality.dcId()), id(ccInterface.id()),
-	    clusterId(clusterId), ac(false), outstandingRequestChecker(Void()), outstandingRemoteRequestChecker(Void()),
-	    startTime(now()), goodRecruitmentTime(Never()), goodRemoteRecruitmentTime(Never()),
-	    dcLogServerVersionDifference(0), dcStorageServerVersionDifference(0), datacenterVersionDifference(0),
+	    clusterId(clusterId), ac(false),
+	    clusterHealthWorkerEventProvider(makeReference<cluster_health::WorkerEventProvider>()),
+	    clusterHealthMonitor(cluster_health::Monitor::create(clusterHealthWorkerEventProvider)),
+	    outstandingRequestChecker(Void()), outstandingRemoteRequestChecker(Void()), startTime(now()),
+	    goodRecruitmentTime(Never()), goodRemoteRecruitmentTime(Never()), dcLogServerVersionDifference(0),
+	    dcStorageServerVersionDifference(0), datacenterVersionDifference(0),
 	    versionDifferenceUpdated(false), remoteDCMonitorStarted(false), remoteTransactionSystemDegraded(false),
 	    recruitDistributor(false), recruitRatekeeper(false), recruitBlobManager(false), recruitBlobMigrator(false),
 	    recruitEncryptKeyProxy(false), recruitConsistencyScan(false),
@@ -3502,7 +3508,10 @@ public:
 		cx = openDBOnServer(db.serverInfo, TaskPriority::DefaultEndpoint, LockAware::True);
 
 		specialCounter(clusterControllerMetrics, "ClientCount", [this]() { return db.clientCount; });
+		updateClusterHealthMonitorInputs();
 	}
+
+	void updateClusterHealthMonitorInputs();
 
 	~ClusterControllerData() {
 		ac.clear(false);

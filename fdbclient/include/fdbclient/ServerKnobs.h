@@ -816,6 +816,17 @@ public:
 	                                               // failover.
 	int CC_FAILOVER_DUE_TO_HEALTH_MAX_DEGRADATION; // The maximum number of degraded servers that can trigger a
 	                                               // failover.
+	double CC_FAILOVER_DUE_TO_TPS_LIMIT_DURATION; // Trigger failover if HealthMetrics.tpsLimit stays at 0 for at
+	                                              // least this duration (disabled with knob value 0.0).
+	bool CLUSTER_HEALTH_METRIC_ENABLE; // Enables periodic cluster-health metric evaluation in CC.
+	double CLUSTER_HEALTH_METRIC_POLL_INTERVAL; // Seconds between cluster-health monitor polls.
+	double CLUSTER_HEALTH_METRIC_STORAGE_INTERVENTION_THRESHOLD; // SS free-space ratio below this needs intervention.
+	double CLUSTER_HEALTH_METRIC_STORAGE_CRITICAL_THRESHOLD; // SS free-space ratio below this is critical.
+	double CLUSTER_HEALTH_METRIC_TLOG_INTERVENTION_THRESHOLD; // TLog queue-disk free-space ratio below this needs
+	                                                          // intervention.
+	double CLUSTER_HEALTH_METRIC_TLOG_CRITICAL_THRESHOLD; // TLog queue-disk free-space ratio below this is critical.
+	double CLUSTER_HEALTH_METRIC_RK_CRITICAL_RELEASED_TPS_RATIO_THRESHOLD; // tpsLimit/releasedTps ratio below this is
+	                                                                       // critical.
 	bool CC_ENABLE_ENTIRE_SATELLITE_MONITORING; // When enabled, gray failure tries to detect whether the entire
 	                                            // satellite DC is degraded.
 	int CC_SATELLITE_DEGRADATION_MIN_COMPLAINER; // When the network between primary and satellite becomes bad, all the

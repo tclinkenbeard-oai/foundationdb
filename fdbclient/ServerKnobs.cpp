@@ -829,6 +829,14 @@ void ServerKnobs::initialize(Randomize randomize, ClientKnobs* clientKnobs, IsSi
 	init( CC_HEALTH_TRIGGER_FAILOVER,                          false, Atomic::NO );
 	init( CC_FAILOVER_DUE_TO_HEALTH_MIN_DEGRADATION,               5 );
 	init( CC_FAILOVER_DUE_TO_HEALTH_MAX_DEGRADATION,              10 );
+	init( CC_FAILOVER_DUE_TO_TPS_LIMIT_DURATION,                 0.0 ); if (randomize && BUGGIFY) CC_FAILOVER_DUE_TO_TPS_LIMIT_DURATION = 10.0;
+	init( CLUSTER_HEALTH_METRIC_ENABLE,                        false ); if( randomize && isSimulated && BUGGIFY ) CLUSTER_HEALTH_METRIC_ENABLE = true;
+	init( CLUSTER_HEALTH_METRIC_POLL_INTERVAL,                   5.0 );
+	init( CLUSTER_HEALTH_METRIC_STORAGE_INTERVENTION_THRESHOLD, 0.20 );
+	init( CLUSTER_HEALTH_METRIC_STORAGE_CRITICAL_THRESHOLD,     0.10 );
+	init( CLUSTER_HEALTH_METRIC_TLOG_INTERVENTION_THRESHOLD,    0.20 );
+	init( CLUSTER_HEALTH_METRIC_TLOG_CRITICAL_THRESHOLD,        0.10 );
+	init( CLUSTER_HEALTH_METRIC_RK_CRITICAL_RELEASED_TPS_RATIO_THRESHOLD, 1.2 );
 	init( CC_ENABLE_ENTIRE_SATELLITE_MONITORING,               false );
 	init( CC_SATELLITE_DEGRADATION_MIN_COMPLAINER,                 3 );
 	init( CC_SATELLITE_DEGRADATION_MIN_BAD_SERVER,                 3 );

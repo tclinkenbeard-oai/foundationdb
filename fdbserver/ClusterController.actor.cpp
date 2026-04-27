@@ -80,6 +80,49 @@
 
 #include "flow/actorcompiler.h" // This must be the last #include.
 
+static bool storageTeamOneReplicaLeftIsCritical(DatabaseConfiguration const& configuration) {
+	return configuration.initialized && configuration.storageTeamSize == 3;
+}
+
+void ClusterControllerData::updateClusterHealthMonitorInputs() {
+	std::vector<WorkerDetails> workers;
+	workers.reserve(id_worker.size());
+	for (auto const& worker : id_worker) {
+		workers.push_back(worker.second.details);
+	}
+	clusterHealthWorkerEventProvider->setWorkers(std::move(workers));
+	clusterHealthWorkerEventProvider->setRecoveryState(db.serverInfo->get().recoveryState);
+	clusterHealthWorkerEventProvider->setStorageTeamOneReplicaLeftIsCritical(
+	    storageTeamOneReplicaLeftIsCritical(db.config));
+
+	Optional<WorkerInterface> ratekeeperWorker;
+	if (db.serverInfo->get().ratekeeper.present()) {
+		auto workerIt = id_worker.find(db.serverInfo->get().ratekeeper.get().locality.processId());
+		if (workerIt != id_worker.end()) {
+			ratekeeperWorker = workerIt->second.details.interf;
+		}
+	}
+	clusterHealthWorkerEventProvider->setRatekeeperWorker(std::move(ratekeeperWorker));
+
+	Optional<WorkerInterface> dataDistributorWorker;
+	if (db.serverInfo->get().distributor.present()) {
+		auto workerIt = id_worker.find(db.serverInfo->get().distributor.get().locality.processId());
+		if (workerIt != id_worker.end()) {
+			dataDistributorWorker = workerIt->second.details.interf;
+		}
+	}
+	clusterHealthWorkerEventProvider->setDataDistributorWorker(std::move(dataDistributorWorker));
+
+	std::vector<StorageServerInterface> storageServers;
+	storageServers.reserve(storageStatusInfos.size());
+	for (auto const& storageStatusInfo : storageStatusInfos) {
+		storageServers.push_back(storageStatusInfo);
+	}
+	clusterHealthWorkerEventProvider->setStorageServers(std::move(storageServers));
+
+	clusterHealthWorkerEventProvider->setTLogs(db.serverInfo->get().logSystemConfig.allPresentLogs());
+}
+
 ACTOR Future<Optional<Value>> getPreviousCoordinators(ClusterControllerData* self) {
 	state ReadYourWritesTransaction tr(self->db.db);
 	loop {
@@ -957,6 +1000,7 @@ ACTOR Future<Void> workerAvailabilityWatch(WorkerInterface worker,
 						cluster->addr_locality.erase(worker.secondaryAddress().get());
 					}
 				}
+				cluster->updateClusterHealthMonitorInputs();
 				cluster->updateWorkerList.set(worker.locality.processId(), Optional<ProcessData>());
 				return Void();
 			}
@@ -1073,6 +1117,8 @@ void clusterRegisterMaster(ClusterControllerData* self, RegisterMasterRequest co
 	db->recoveryStalled = req.recoveryStalled;
 	if (req.configuration.present()) {
 		db->config = req.configuration.get();
+		self->clusterHealthWorkerEventProvider->setStorageTeamOneReplicaLeftIsCritical(
+		    storageTeamOneReplicaLeftIsCritical(db->config));
 
 		if (req.recoveryState >= RecoveryState::ACCEPTING_COMMITS) {
 			self->gotFullyRecoveredConfig = true;
@@ -1097,6 +1143,7 @@ void clusterRegisterMaster(ClusterControllerData* self, RegisterMasterRequest co
 	if (dbInfo.recoveryState != req.recoveryState) {
 		dbInfo.recoveryState = req.recoveryState;
 		isChanged = true;
+		self->clusterHealthWorkerEventProvider->setRecoveryState(req.recoveryState);
 	}
 
 	if (dbInfo.priorCommittedLogServers != req.priorCommittedLogServers) {
@@ -1161,6 +1208,7 @@ void clusterRegisterMaster(ClusterControllerData* self, RegisterMasterRequest co
 		dbInfo.id = deterministicRandom()->randomUniqueID();
 		dbInfo.infoGeneration = ++self->db.dbInfoCount;
 		self->db.serverInfo->set(dbInfo);
+		self->updateClusterHealthMonitorInputs();
 	}
 
 	checkOutstandingRequests(self);
@@ -1339,6 +1387,7 @@ ACTOR Future<Void> registerWorker(RegisterWorkerRequest req,
 		    w.locality.processId() == self->db.serverInfo->get().master.locality.processId()) {
 			self->masterProcessId = w.locality.processId();
 		}
+		self->updateClusterHealthMonitorInputs();
 		if (configBroadcaster != nullptr && req.lastSeenKnobVersion.present() && req.knobConfigClassSet.present()) {
 			self->addActor.send(configBroadcaster->registerNode(req.configBroadcastInterface,
 			                                                    req.lastSeenKnobVersion.get(),
@@ -1375,6 +1424,7 @@ ACTOR Future<Void> registerWorker(RegisterWorkerRequest req,
 			self->updateDBInfoEndpoints.insert(w.updateServerDBInfo.getEndpoint());
 			self->updateDBInfo.trigger();
 		}
+		self->updateClusterHealthMonitorInputs();
 		if (configBroadcaster != nullptr && req.lastSeenKnobVersion.present() && req.knobConfigClassSet.present()) {
 			self->addActor.send(configBroadcaster->registerNode(req.configBroadcastInterface,
 			                                                    req.lastSeenKnobVersion.get(),
@@ -1785,6 +1835,7 @@ ACTOR Future<Void> monitorStorageMetadata(ClusterControllerData* self) {
 			wait(tr->commit());
 
 			self->storageStatusInfos = std::move(servers);
+			self->updateClusterHealthMonitorInputs();
 			wait(watchFuture);
 			tr->reset();
 		} catch (Error& e) {
@@ -3256,6 +3307,7 @@ ACTOR Future<Void> clusterControllerCore(ClusterControllerFullInterface interf,
 	self.addActor.send(monitorBlobMigrator(&self));
 	self.addActor.send(watchBlobRestoreCommand(&self));
 	self.addActor.send(monitorConsistencyScan(&self));
+	self.addActor.send(self.clusterHealthMonitor.run());
 	self.addActor.send(metaclusterMetricsUpdater(&self));
 	self.addActor.send(dbInfoUpdater(&self));
 	self.addActor.send(updateClusterId(&self));

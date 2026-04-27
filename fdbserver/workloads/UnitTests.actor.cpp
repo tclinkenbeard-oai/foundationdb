@@ -57,6 +57,7 @@ void forceLinkRESTSimKmsVaultTest();
 void forceLinkActorFuzzUnitTests();
 void forceLinkGrpcTests();
 void forceLinkGrpcTests2();
+void forceLinkClusterHealthMonitorTests();
 
 struct UnitTestWorkload : TestWorkload {
 	static constexpr auto NAME = "UnitTests";
@@ -132,6 +133,7 @@ struct UnitTestWorkload : TestWorkload {
 		forceLinkSimKmsVaultTests();
 		forceLinkRESTSimKmsVaultTest();
 		forceLinkActorFuzzUnitTests();
+		forceLinkClusterHealthMonitorTests();
 
 #ifdef FLOW_GRPC_ENABLED
 		forceLinkGrpcTests();
