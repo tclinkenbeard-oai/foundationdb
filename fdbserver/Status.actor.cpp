@@ -3097,7 +3097,6 @@ ACTOR static Future<Void> clusterGetStatusImpl(JsonBuilderObject* pStatusObj,
 			}
 		}
 
-
 		// Get the master Worker interface
 		Optional<WorkerDetails> _mWorker = getWorker(workers, db->get().master.address());
 		if (_mWorker.present()) {
@@ -3419,7 +3418,6 @@ ACTOR static Future<Void> clusterGetStatusImpl(JsonBuilderObject* pStatusObj,
 
 			state std::vector<JsonBuilderObject> workerStatuses = wait(getAll(futures2));
 
-
 			// workloadStatusFetcher returns the workload section but also optionally writes the qos section and
 			// adds to the dataOverlay object
 			if (!workerStatuses[1].empty())
@@ -3430,8 +3428,6 @@ ACTOR static Future<Void> clusterGetStatusImpl(JsonBuilderObject* pStatusObj,
 			// Add qos section if it was populated
 			if (!qos.empty())
 				statusObj["qos"] = qos;
-
-
 
 			// Merge dataOverlay into data
 			JsonBuilderObject& clusterDataSection = workerStatuses[0];
@@ -3649,8 +3645,8 @@ ACTOR Future<StatusReply> clusterGetStatus(
     ServerCoordinators coordinators,
     std::vector<NetworkAddress> incompatibleConnections,
     Version datacenterVersionDifference,
-	Version dcLogServerVersionDifference,
-	Version dcStorageServerVersionDifference,
+    Version dcLogServerVersionDifference,
+    Version dcStorageServerVersionDifference,
     std::unordered_map<NetworkAddress, double> excludedDegradedServers,
     double deadlineTimeout) {
 	state JsonBuilderObject statusObj;
