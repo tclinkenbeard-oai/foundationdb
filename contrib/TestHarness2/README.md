@@ -81,6 +81,8 @@ TestHarness2 supports environment variables for configuration. Most variables fo
 **Optional Configuration:**
 - **`TH_RANDOM_SEED`**: Force specific random seed for debugging
 - **`TH_OUTPUT_FORMAT`**: Output format (`xml` or `json`, default: `xml`)
+- **`TH_CODE_PROBE_REPORTING_SAMPLE_RATE`**: Probability that a test run
+  reports code probes (`0.0` to `1.0`, default: `1.0`)
 
 When `TH_FDBSERVER_MEMORY` is unset, TestHarness2 automatically runs sanitizer-instrumented
 `fdbserver` binaries with `--memory 12288MiB` so ASAN/UBSAN correctness jobs do not stay

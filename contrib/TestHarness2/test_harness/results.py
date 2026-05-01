@@ -61,6 +61,11 @@ class EnsembleResults:
 
     def dump(self, prefix: str):
         errors = 0
+        sample_rate = config.code_probe_reporting_sample_rate
+        if sample_rate < 0.0 or sample_rate > 1.0:
+            raise ValueError(
+                "code_probe_reporting_sample_rate must be between 0.0 and 1.0"
+            )
         out = SummaryTree("EnsembleResults")
         out.attributes["TotalRuntime"] = str(self.global_statistics.total_cpu_time)
         out.attributes["TotalTestRuns"] = str(self.global_statistics.total_test_runs)
@@ -71,6 +76,8 @@ class EnsembleResults:
         out.attributes["MissedNonRareProbes"] = str(
             self.global_statistics.total_missed_nonrare_probes
         )
+        if sample_rate < 1.0:
+            out.attributes["CodeProbeReportingSampleRate"] = str(sample_rate)
 
         for cov, count in self.coverage:
             severity = 10
@@ -78,7 +85,10 @@ class EnsembleResults:
                 severity = 30 if cov.rare else 40
             if severity == 40:
                 errors += 1
-            if (severity == 40 and errors <= config.max_errors) or config.details:
+            should_report = (
+                severity == 40 and errors <= config.max_errors
+            ) or config.details
+            if should_report:
                 child = SummaryTree("CodeProbe")
                 child.attributes["Severity"] = str(severity)
                 child.attributes["File"] = cov.file

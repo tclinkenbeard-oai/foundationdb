@@ -230,6 +230,10 @@ class Config:
         self.hit_per_runs_ratio_args = {
             "help": "Maximum test runs before each code probe hit at least once"
         }
+        self.code_probe_reporting_sample_rate: float = 1.0
+        self.code_probe_reporting_sample_rate_args = {
+            "help": "Probability that a test run reports code probes"
+        }
         self.output_format: str = "xml"
         self.output_format_args = {
             "short_name": "O",
@@ -352,7 +356,7 @@ class Config:
                 continue
             env_name = self._get_env_name(attr)
             attr_type = self._config_map[attr].kwargs["type"]
-            assert type(None) != attr_type
+            assert attr_type is not type(None)
             e = os.getenv(env_name)
             if e is not None:
                 # Use the env var to supply the default value, so that if the

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import hashlib
 import inspect
 import json
 import os
@@ -28,6 +29,22 @@ from typing import (
 
 from test_harness.config import config
 from test_harness.valgrind import parse_valgrind_output
+
+
+def should_report_code_probes(sample_key: str, sample_rate: float) -> bool:
+    if sample_rate < 0.0 or sample_rate > 1.0:
+        raise ValueError(
+            "code_probe_reporting_sample_rate must be between 0.0 and 1.0"
+        )
+    if sample_rate >= 1.0:
+        return True
+    if sample_rate <= 0.0:
+        return False
+
+    sample = int.from_bytes(
+        hashlib.sha256(sample_key.encode("utf-8")).digest()[:8], "big"
+    ) / 2**64
+    return sample < sample_rate
 
 
 class SummaryTree:
@@ -333,6 +350,7 @@ class Summary:
         self.max_rss: int | None = max_rss
         self.was_killed: bool = was_killed
         self.long_running = long_running
+        self.uid: uuid.UUID | None = uid
         self.expected_unseed: int | None = expected_unseed
         self.exit_code: int = exit_code
         self.out: SummaryTree = SummaryTree("Test")
@@ -389,8 +407,16 @@ class Summary:
             self.out.append(child)
             return
         self.summarize_files(trace_files[0])
+        code_probe_sample_key = str(self.uid) if self.uid is not None else command
+        report_code_probes = should_report_code_probes(
+            code_probe_sample_key, config.code_probe_reporting_sample_rate
+        )
         # Skip write_coverage for old binaries in restarting tests
-        if config.joshua_dir is not None and not self.is_old_binary:
+        if (
+            config.joshua_dir is not None
+            and not self.is_old_binary
+            and report_code_probes
+        ):
             import test_harness.fdb
 
             test_harness.fdb.write_coverage(
@@ -424,7 +450,11 @@ class Summary:
         return (not self.error) != self.is_negative_test
 
     def done(self):
-        if config.print_coverage:
+        report_code_probes = should_report_code_probes(
+            str(self.uid) if self.uid is not None else "",
+            config.code_probe_reporting_sample_rate,
+        )
+        if config.print_coverage and report_code_probes:
             for k, v in self.coverage.items():
                 child = SummaryTree("CodeCoverage")
                 child.attributes["File"] = k.file
