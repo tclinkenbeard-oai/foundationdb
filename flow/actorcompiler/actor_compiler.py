@@ -2881,6 +2881,7 @@ def compile_file(
     policy = ErrorMessagePolicy()
     policy.DisableDiagnostics = disable_diagnostics
     source_abs = os.path.abspath(input_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     # Reset per-invocation global naming state to mirror C# executable behavior (one file per process)
     ActorCompiler.usedClassNames = set()
     try:
