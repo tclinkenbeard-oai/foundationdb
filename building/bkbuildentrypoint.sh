@@ -118,7 +118,7 @@ upload_release_binaries() {
   local release_arch
   local release_dest
   local binary_dir="build_output/packages/bin"
-  local binaries=(fdbserver fdbcli fdbmonitor)
+  local binaries=(fdbserver fdbbackup fdbrestore backup_agent fdbcli fdbmonitor)
   local binary
 
   if [[ -z "${release_version}" ]]; then
@@ -142,8 +142,10 @@ upload_release_binaries() {
   echo "Uploading release binaries to ${release_dest}"
   (
     cd "${binary_dir}"
-    BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${release_dest}" \
-      buildkite-agent artifact upload "${binaries[@]}"
+    for binary in "${binaries[@]}"; do
+      BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${release_dest}" \
+        buildkite-agent artifact upload "${binary}"
+    done
   )
 }
 

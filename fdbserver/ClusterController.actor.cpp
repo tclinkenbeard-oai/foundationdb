@@ -2178,6 +2178,52 @@ ACTOR Future<Void> updateRemoteDCHealth(ClusterControllerData* self) {
 	}
 }
 
+ACTOR Future<Void> monitorRatekeeperTpsLimit(ClusterControllerData* self) {
+	loop {
+		try {
+			wait(delay(1.0));
+
+			if (self->db.config.usableRegions <= 1 ||
+			    self->db.serverInfo->get().recoveryState < RecoveryState::ACCEPTING_COMMITS) {
+				self->ratekeeperMonitor.resetZeroRatekeeperTpsLimitObservation();
+				continue;
+			}
+
+			state HealthMetrics healthMetrics = wait(self->cx->getHealthMetrics(/*detailed=*/false));
+			if (!self->ratekeeperMonitor.hasSustainedZeroRatekeeperTpsLimit(healthMetrics.tpsLimit)) {
+				continue;
+			}
+
+			if (self->canSafelyTriggerFailoverToRemoteDc()) {
+				if (SERVER_KNOBS->CC_HEALTH_TRIGGER_FAILOVER &&
+				    self->triggerFailoverToRemoteDc("RatekeeperZeroTpsLimit", healthMetrics.tpsLimit)) {
+					CODE_PROBE(true, "Ratekeeper zero TPS limit triggered region failover", probe::decoration::rare);
+					self->ratekeeperMonitor.resetZeroRatekeeperTpsLimitObservation();
+				} else if (!SERVER_KNOBS->CC_HEALTH_TRIGGER_FAILOVER) {
+					TraceEvent(SevWarn, "RatekeeperZeroTpsLimitSuggestFailover", self->id)
+					    .suppressFor(std::max(1.0, SERVER_KNOBS->CC_FAILOVER_DUE_TO_TPS_LIMIT_DURATION))
+					    .detail("TPSLimit", healthMetrics.tpsLimit)
+					    .detail("ZeroTpsDuration", self->ratekeeperMonitor.getZeroRatekeeperTpsLimitDuration());
+				}
+			} else {
+				TraceEvent(SevWarn, "RatekeeperZeroTpsLimitSuggestFailover", self->id)
+				    .suppressFor(std::max(1.0, SERVER_KNOBS->CC_FAILOVER_DUE_TO_TPS_LIMIT_DURATION))
+				    .detail("TPSLimit", healthMetrics.tpsLimit)
+				    .detail("VersionDifferenceUpdated", self->versionDifferenceUpdated)
+				    .detail("DatacenterVersionDifference", self->datacenterVersionDifference)
+				    .detail("RemoteDcHealthy", self->remoteDCIsHealthy())
+				    .detail("ZeroTpsDuration", self->ratekeeperMonitor.getZeroRatekeeperTpsLimitDuration());
+			}
+		} catch (Error& e) {
+			TraceEvent(SevWarn, "MonitorRatekeeperTpsLimitError", self->id).error(e);
+			self->ratekeeperMonitor.resetZeroRatekeeperTpsLimitObservation();
+			if (e.code() == error_code_actor_cancelled) {
+				throw;
+			}
+		}
+	}
+}
+
 ACTOR Future<Void> doEmptyCommit(Database cx) {
 	state Transaction tr(cx);
 	loop {
@@ -3145,22 +3191,18 @@ ACTOR Future<Void> workerHealthMonitor(ClusterControllerData* self) {
 						TraceEvent(SevWarn, "DegradedServerDetectedAndSuggestRecovery").log();
 					}
 				} else if (self->shouldTriggerFailoverDueToDegradedServers()) {
-					double ccUpTime = now() - machineStartTime();
-					if (SERVER_KNOBS->CC_HEALTH_TRIGGER_FAILOVER &&
-					    ccUpTime > SERVER_KNOBS->INITIAL_UPDATE_CROSS_DC_INFO_DELAY) {
+					const bool canSafelyFailover = self->canSafelyTriggerFailoverToRemoteDc();
+					const double ccUpTime = machineStartTime() == 0 ? 0.0 : now() - machineStartTime();
+					if (SERVER_KNOBS->CC_HEALTH_TRIGGER_FAILOVER && canSafelyFailover) {
 						TraceEvent(SevWarn, "DegradedServerDetectedAndTriggerFailover").log();
-						std::vector<Optional<Key>> dcPriority;
-						auto remoteDcId = self->db.config.regions[0].dcId == self->clusterControllerDcId.get()
-						                      ? self->db.config.regions[1].dcId
-						                      : self->db.config.regions[0].dcId;
-
-						// Switch the current primary DC and remote DC in desiredDcIds, so that the remote DC
-						// becomes the new primary, and the primary DC becomes the new remote.
-						dcPriority.push_back(remoteDcId);
-						dcPriority.push_back(self->clusterControllerDcId);
-						self->desiredDcIds.set(dcPriority);
+						self->triggerFailoverToRemoteDc("DegradedServers");
 					} else {
-						TraceEvent(SevWarn, "DegradedServerDetectedAndSuggestFailover").detail("CCUpTime", ccUpTime);
+						TraceEvent(SevWarn, "DegradedServerDetectedAndSuggestFailover")
+						    .detail("CCUpTime", ccUpTime)
+						    .detail("CanSafelyFailover", canSafelyFailover)
+						    .detail("VersionDifferenceUpdated", self->versionDifferenceUpdated)
+						    .detail("DatacenterVersionDifference", self->datacenterVersionDifference)
+						    .detail("RemoteDcHealthy", self->remoteDCIsHealthy());
 					}
 				}
 			}
@@ -3298,6 +3340,9 @@ ACTOR Future<Void> clusterControllerCore(ClusterControllerFullInterface interf,
 	self.addActor.send(updatedChangingDatacenters(&self));
 	self.addActor.send(updatedChangedDatacenters(&self));
 	self.addActor.send(updateDatacenterVersionDifference(&self));
+	if (SERVER_KNOBS->CC_FAILOVER_DUE_TO_TPS_LIMIT_DURATION > 0) {
+		self.addActor.send(monitorRatekeeperTpsLimit(&self));
+	}
 	self.addActor.send(handleForcedRecoveries(&self, interf));
 	self.addActor.send(handleTriggerAuditStorage(&self, interf));
 	self.addActor.send(monitorDataDistributor(&self));
