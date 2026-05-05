@@ -273,12 +273,12 @@ static void traceKeyValuesDiff(TraceEvent& event,
 	ASSERT(mismatchFound);
 }
 
-template <>
-void TSS_traceMismatch(TraceEvent& event,
-                       const GetKeyValuesRequest& req,
-                       const GetKeyValuesReply& src,
-                       const GetKeyValuesReply& tss,
-                       const ComparisonType& type) {
+template <class Request, class Reply>
+static void traceRangeReadMismatch(TraceEvent& event,
+                                   const Request& req,
+                                   const Reply& src,
+                                   const Reply& tss,
+                                   const ComparisonType& type) {
 	traceKeyValuesDiff(event,
 	                   req.begin,
 	                   req.end,
@@ -290,6 +290,15 @@ void TSS_traceMismatch(TraceEvent& event,
 	                   tss.data,
 	                   tss.more,
 	                   type);
+}
+
+template <>
+void TSS_traceMismatch(TraceEvent& event,
+                       const GetKeyValuesRequest& req,
+                       const GetKeyValuesReply& src,
+                       const GetKeyValuesReply& tss,
+                       const ComparisonType& type) {
+	traceRangeReadMismatch(event, req, src, tss, type);
 }
 
 // range reads and flat map
@@ -334,24 +343,13 @@ const char* LB_mismatchTraceName(const GetKeyValuesStreamRequest& req, const Com
 	return type == TSS_COMPARISON ? "TSSMismatchGetKeyValuesStream" : "ReplicaMismatchGetKeyValuesStream";
 }
 
-// TODO this is all duplicated from above, simplify?
 template <>
 void TSS_traceMismatch(TraceEvent& event,
                        const GetKeyValuesStreamRequest& req,
                        const GetKeyValuesStreamReply& src,
                        const GetKeyValuesStreamReply& tss,
                        const ComparisonType& type) {
-	traceKeyValuesDiff(event,
-	                   req.begin,
-	                   req.end,
-	                   req.version,
-	                   req.limit,
-	                   req.limitBytes,
-	                   src.data,
-	                   src.more,
-	                   tss.data,
-	                   tss.more,
-	                   type);
+	traceRangeReadMismatch(event, req, src, tss, type);
 }
 
 template <>
