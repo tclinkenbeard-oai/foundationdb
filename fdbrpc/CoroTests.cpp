@@ -226,6 +226,7 @@ struct YieldMockNetwork final : INetwork, ReferenceCounted<YieldMockNetwork> {
 	double timer() override { return baseNetwork->timer(); }
 	double timer_monotonic() override { return baseNetwork->timer_monotonic(); }
 	void stop() override { return baseNetwork->stop(); }
+	bool isStopped() const override { return baseNetwork->isStopped(); }
 	void addStopCallback(std::function<void()> fn) override {
 		ASSERT(false);
 		return;
