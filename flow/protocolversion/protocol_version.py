@@ -351,6 +351,7 @@ def main():
     else:
         raise RuntimeError("Unknown generator {}".format(args.generator))
 
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w") as stream:
         stream.write(generator(protocol_version).render())
 
