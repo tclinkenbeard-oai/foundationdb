@@ -117,6 +117,9 @@ public:
 	typedef int64_t Value;
 
 	Counter(std::string const& name, CounterCollection& collection, bool skipTraceOnSilentInterval = false);
+	~Counter();
+	Counter(Counter&&) = delete;
+	Counter& operator=(Counter&&) = delete;
 
 	void operator+=(Value delta);
 	void operator++() { *this += 1; }
@@ -145,6 +148,7 @@ public:
 
 	bool hasRate() const override { return true; }
 	bool hasRoughness() const override { return true; }
+	void remove() override;
 
 	bool suppressTrace() const override { return skip_trace_on_silent_interval && getIntervalDelta() == 0; }
 
@@ -153,6 +157,7 @@ private:
 	double interval_start, last_event, interval_sq_time, roughness_interval_start;
 	Value interval_delta, interval_start_value;
 	Int64MetricHandle metric;
+	bool metricRemoved = false;
 	bool skip_trace_on_silent_interval;
 };
 

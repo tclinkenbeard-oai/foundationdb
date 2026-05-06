@@ -1278,8 +1278,9 @@ public:
 	ActorLineageSet& getActorLineageSet() override { return actorLineageSet; }
 #endif
 
-	void stop() override { isStopped = true; }
+	void stop() override { ISimulator::isStopped = true; }
 	void addStopCallback(std::function<void()> fn) override { stopCallbacks.emplace_back(std::move(fn)); }
+	bool isStopped() const override { return ISimulator::isStopped; }
 	bool isSimulated() const override { return true; }
 
 	struct SimThreadArgs {
@@ -1404,7 +1405,7 @@ public:
 		ISimulator::ProcessInfo* callingMachine = self->currentProcess;
 		ISimulator::isMainThread = true;
 		int lastPrintTime = 0;
-		while (!self->isStopped) {
+		while (!self->isStopped()) {
 			if (self->taskQueue.canSleep()) {
 				double sleepTime = self->taskQueue.getSleepTime(self->time);
 				self->time +=

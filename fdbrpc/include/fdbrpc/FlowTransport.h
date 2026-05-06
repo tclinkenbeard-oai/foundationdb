@@ -196,6 +196,7 @@ class FlowTransport : NonCopyable {
 public:
 	FlowTransport(uint64_t transportId, int maxWellKnownEndpoints, IPAllowList const* allowList);
 	~FlowTransport();
+	Future<Void> shutdown();
 
 	// Creates a new FlowTransport and makes FlowTransport::transport() return it.  This uses g_network->global()
 	// variables, so it will be private to a simulation.

@@ -77,3 +77,80 @@ void DatabaseContext::deleteWatchMetadata(int64_t tenantId, KeyRef key, bool rem
 		watchCounterMap.erase(mapKey);
 	}
 }
+
+void DatabaseContext::shutdown() {
+	if (shutdownStarted.exchange(true, std::memory_order_acq_rel)) {
+		return;
+	}
+	cacheListMonitor.cancel();
+	clientInfoMonitor.cancel();
+	clientDBInfoMonitor.cancel();
+	monitorTssInfoChange.cancel();
+	tssMismatchHandler.cancel();
+	if (clientStatusUpdater.actor.isValid()) {
+		clientStatusUpdater.actor.cancel();
+	}
+	if (globalConfig) {
+		globalConfig.reset();
+	}
+	if (clientInfo) {
+		clientInfo->set(ClientDBInfo());
+		clientInfo.clear();
+	}
+	if (grvUpdateHandler.isValid()) {
+		grvUpdateHandler.cancel();
+	}
+	for (auto& [_, batcher] : versionBatcher) {
+		if (batcher.actor.isValid()) {
+			batcher.actor.cancel();
+		}
+	}
+	versionBatcher.clear();
+	std::vector<Reference<WatchMetadata>> watchesToCancel;
+	watchesToCancel.reserve(watchMap.size());
+	for (auto& [_, metadata] : watchMap) {
+		watchesToCancel.push_back(metadata);
+	}
+	watchMap.clear();
+	watchCounterMap.clear();
+	for (auto& metadata : watchesToCancel) {
+		if (metadata->watchFutureSS.isValid()) {
+			metadata->watchFutureSS.cancel();
+		}
+		if (metadata->watchPromise.canBeSet()) {
+			metadata->watchPromise.sendError(actor_cancelled());
+		}
+	}
+	if (logger.isValid()) {
+		logger.cancel();
+	}
+	if (throttleExpirer.isValid()) {
+		throttleExpirer.cancel();
+	}
+	if (statusLeaderMon.isValid()) {
+		statusLeaderMon.cancel();
+	}
+	if (changeFeedStorageCommitter.isValid()) {
+		changeFeedStorageCommitter.cancel();
+	}
+	if (initializeChangeFeedCache.isValid()) {
+		initializeChangeFeedCache.cancel();
+	}
+	storage = nullptr;
+	if (sharedStatePtr) {
+		sharedStatePtr->delRef(sharedStatePtr);
+		sharedStatePtr = nullptr;
+	}
+	for (auto it = server_interf.begin(); it != server_interf.end(); it = server_interf.erase(it)) {
+		it->second->notifyContextDestroyed();
+	}
+	ASSERT_ABORT(server_interf.empty());
+	locationCache.insert(allKeys, Reference<LocationInfo>());
+	for (auto& it : notAtLatestChangeFeeds) {
+		it.second->context = nullptr;
+	}
+	for (auto& it : changeFeedUpdaters) {
+		it.second->context = nullptr;
+	}
+	locationCache.clear();
+}

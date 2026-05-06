@@ -28,7 +28,94 @@
 #include "fdbclient/GenericManagementAPI.actor.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "flow/Arena.h"
+#include "flow/genericactors.actor.h"
 #include "flow/ProtocolVersion.h"
+#include "flow/network.h"
+
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <utility>
+#include <vector>
+
+namespace {
+
+class ThreadSafeCleanupTracker {
+public:
+	static ThreadSafeCleanupTracker& instance() {
+		static ThreadSafeCleanupTracker tracker;
+		return tracker;
+	}
+
+	void beginDraining() { draining.store(true, std::memory_order_release); }
+
+	void waitForDrain() {
+		std::unique_lock<std::mutex> lk(mutex);
+		cv.wait(lk, [&] { return pending.load(std::memory_order_acquire) == 0; });
+	}
+
+	template <class Fn>
+	void schedule(Fn&& fn) {
+		// Reserve the work before checking the drain state so waitForDrain() cannot
+		// miss a callback that was already on its way to the main thread.
+		pending.fetch_add(1, std::memory_order_acq_rel);
+		if (shouldRunInline()) {
+			std::forward<Fn>(fn)();
+			markDone();
+			return;
+		}
+		onMainThreadVoid([fn = std::forward<Fn>(fn)]() mutable {
+			fn();
+			ThreadSafeCleanupTracker::instance().markDone();
+		});
+	}
+
+private:
+	void markDone() {
+		if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+			cv.notify_all();
+		}
+	}
+
+	bool shouldRunInline() const {
+		if (draining.load(std::memory_order_acquire)) {
+			return true;
+		}
+		if (!g_network) {
+			return true;
+		}
+		if (g_network->isStopped()) {
+			return true;
+		}
+		return false;
+	}
+
+	std::atomic<int> pending{ 0 };
+	std::atomic<bool> draining{ false };
+	mutable std::mutex mutex;
+	std::condition_variable cv;
+
+	friend void waitForThreadSafeCleanup();
+	friend void beginThreadSafeCleanup();
+};
+
+template <class Fn>
+void scheduleThreadSafeCleanup(Fn&& fn) {
+	ThreadSafeCleanupTracker::instance().schedule(std::forward<Fn>(fn));
+}
+
+} // namespace
+
+Mutex ThreadSafeDatabase::allDatabasesLock;
+std::unordered_set<ThreadSafeDatabase*> ThreadSafeDatabase::allDatabases;
+
+void beginThreadSafeCleanup() {
+	ThreadSafeCleanupTracker::instance().beginDraining();
+}
+
+void waitForThreadSafeCleanup() {
+	ThreadSafeCleanupTracker::instance().waitForDrain();
+}
 
 // Users of ThreadSafeTransaction might share Reference<ThreadSafe...> between different threads as long as they don't
 // call addRef (e.g. C API follows this). Therefore, it is unsafe to call (explicitly or implicitly) this->addRef in any
@@ -57,7 +144,8 @@ Reference<ITenant> ThreadSafeDatabase::openTenant(TenantNameRef tenantName) {
 
 Reference<ITransaction> ThreadSafeDatabase::createTransaction() {
 	auto type = isConfigDB ? ISingleThreadTransaction::Type::PAXOS_CONFIG : ISingleThreadTransaction::Type::RYW;
-	return Reference<ITransaction>(new ThreadSafeTransaction(db, type, Optional<TenantName>(), nullptr));
+	auto self = Reference<ThreadSafeDatabase>::addRef(this);
+	return makeReference<ThreadSafeTransaction>(db, std::move(self), type, Optional<TenantName>(), nullptr);
 }
 
 void ThreadSafeDatabase::setOption(FDBDatabaseOptions::Option option, Optional<StringRef> value) {
@@ -215,9 +303,11 @@ ThreadFuture<bool> ThreadSafeDatabase::flushBlobRange(const KeyRangeRef& keyRang
 	});
 }
 
-ThreadSafeDatabase::ThreadSafeDatabase(ConnectionRecordType connectionRecordType,
+ThreadSafeDatabase::ThreadSafeDatabase(ThreadSafeApi* api,
+                                       ConnectionRecordType connectionRecordType,
                                        std::string connectionRecordString,
-                                       int apiVersion) {
+                                       int apiVersion)
+  : api(api), shutdownOnClose(true) {
 	// Allocate memory for the Database from this thread (so the pointer is known for subsequent method calls)
 	// but run its constructor on the main thread
 	DatabaseContext* db = this->db = DatabaseContext::allocateOnForeignThread();
@@ -237,6 +327,7 @@ ThreadSafeDatabase::ThreadSafeDatabase(ConnectionRecordType connectionRecordType
 			new (db) DatabaseContext(unknown_error());
 		}
 	});
+	registerSelf();
 }
 
 ThreadFuture<Standalone<StringRef>> ThreadSafeDatabase::getClientStatus() {
@@ -245,13 +336,105 @@ ThreadFuture<Standalone<StringRef>> ThreadSafeDatabase::getClientStatus() {
 }
 
 ThreadSafeDatabase::~ThreadSafeDatabase() {
-	DatabaseContext* db = this->db;
-	onMainThreadVoid([db]() { db->delref(); });
+	unregisterSelf();
+	api = nullptr;
+	close();
+}
+
+void ThreadSafeDatabase::close() {
+	if (closed.exchange(true, std::memory_order_acq_rel)) {
+		return;
+	}
+	std::vector<ThreadSafeTransaction*> transactionsToClose;
+	std::vector<ThreadSafeTenant*> tenantsToClose;
+	{
+		MutexHolder holder(childrenLock);
+		transactionsToClose.reserve(transactions.size());
+		transactionsToClose.insert(transactionsToClose.end(), transactions.begin(), transactions.end());
+		tenantsToClose.reserve(tenants.size());
+		tenantsToClose.insert(tenantsToClose.end(), tenants.begin(), tenants.end());
+	}
+	for (auto* txn : transactionsToClose) {
+		txn->close();
+	}
+	for (auto* tenantPtr : tenantsToClose) {
+		tenantPtr->close();
+	}
+	DatabaseContext* toRelease = db;
+	db = nullptr;
+	if (!toRelease) {
+		return;
+	}
+	const bool shouldShutdown = shutdownOnClose;
+	scheduleThreadSafeCleanup([toRelease, shouldShutdown]() {
+		if (shouldShutdown) {
+			toRelease->shutdown();
+		}
+		toRelease->delref();
+	});
+}
+
+void ThreadSafeDatabase::registerSelf() {
+	MutexHolder holder(allDatabasesLock);
+	allDatabases.insert(this);
+}
+
+void ThreadSafeDatabase::unregisterSelf() {
+	MutexHolder holder(allDatabasesLock);
+	allDatabases.erase(this);
+}
+
+bool ThreadSafeDatabase::registerTenant(ThreadSafeTenant* tenant) {
+	MutexHolder holder(childrenLock);
+	if (closed.load(std::memory_order_acquire)) {
+		return false;
+	}
+	tenants.insert(tenant);
+	return true;
+}
+
+void ThreadSafeDatabase::unregisterTenant(ThreadSafeTenant* tenant) {
+	MutexHolder holder(childrenLock);
+	tenants.erase(tenant);
+}
+
+bool ThreadSafeDatabase::registerTransaction(ThreadSafeTransaction* transaction) {
+	MutexHolder holder(childrenLock);
+	if (closed.load(std::memory_order_acquire)) {
+		return false;
+	}
+	transactions.insert(transaction);
+	return true;
+}
+
+void ThreadSafeDatabase::unregisterTransaction(ThreadSafeTransaction* transaction) {
+	MutexHolder holder(childrenLock);
+	transactions.erase(transaction);
+}
+
+void ThreadSafeDatabase::closeAllDatabases() {
+	std::vector<ThreadSafeDatabase*> toClose;
+	{
+		MutexHolder holder(allDatabasesLock);
+		toClose.reserve(allDatabases.size());
+		for (auto* db : allDatabases) {
+			toClose.push_back(db);
+		}
+	}
+	for (auto* db : toClose) {
+		db->close();
+	}
 }
 
 ThreadSafeTenant::ThreadSafeTenant(Reference<ThreadSafeDatabase> db, TenantName name) : db(db), name(name) {
 	Tenant* tenant = this->tenant = Tenant::allocateOnForeignThread();
-	DatabaseContext* cx = db->db;
+	if (!this->db || !this->db->registerTenant(this)) {
+		Tenant::operator delete(tenant);
+		this->tenant = nullptr;
+		this->db.clear();
+		throw network_not_setup();
+	}
+	DatabaseContext* cx = this->db->db;
 	onMainThreadVoid([tenant, cx, name]() {
 		cx->addref();
 		new (tenant) Tenant(Database(cx), name);
@@ -259,108 +442,157 @@ ThreadSafeTenant::ThreadSafeTenant(Reference<ThreadSafeDatabase> db, TenantName 
 }
 
 Reference<ITransaction> ThreadSafeTenant::createTransaction() {
-	auto type = db->isConfigDB ? ISingleThreadTransaction::Type::PAXOS_CONFIG : ISingleThreadTransaction::Type::RYW;
-	return Reference<ITransaction>(new ThreadSafeTransaction(db->db, type, name, tenant));
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	auto type =
+	    database->isConfigDB ? ISingleThreadTransaction::Type::PAXOS_CONFIG : ISingleThreadTransaction::Type::RYW;
+	Tenant* tenantPtr = checkedTenant();
+	return makeReference<ThreadSafeTransaction>(database->unsafeGetPtr(), database, type, name, tenantPtr);
 }
 
 ThreadFuture<int64_t> ThreadSafeTenant::getId() {
-	Tenant* tenant = this->tenant;
-	return onMainThread([tenant]() -> Future<int64_t> { return tenant->getIdFuture(); });
+	Tenant* tenantPtr = checkedTenant();
+	return onMainThread([tenantPtr]() -> Future<int64_t> { return tenantPtr->getIdFuture(); });
 }
 
 ThreadFuture<Key> ThreadSafeTenant::purgeBlobGranules(const KeyRangeRef& keyRange, Version purgeVersion, bool force) {
-	DatabaseContext* db = this->db->db;
-	Tenant* tenantPtr = this->tenant;
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	DatabaseContext* rawDb = database->unsafeGetPtr();
+	Tenant* tenantPtr = checkedTenant();
 	KeyRange range = keyRange;
-	return onMainThread([db, range, purgeVersion, tenantPtr, force]() -> Future<Key> {
-		db->addref();
-		return db->purgeBlobGranules(range, purgeVersion, Reference<Tenant>::addRef(tenantPtr), force);
+	return onMainThread([rawDb, range, purgeVersion, tenantPtr, force]() -> Future<Key> {
+		rawDb->addref();
+		return rawDb->purgeBlobGranules(range, purgeVersion, Reference<Tenant>::addRef(tenantPtr), force);
 	});
 }
 
 ThreadFuture<Void> ThreadSafeTenant::waitPurgeGranulesComplete(const KeyRef& purgeKey) {
-	DatabaseContext* db = this->db->db;
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	DatabaseContext* rawDb = database->unsafeGetPtr();
 	Key key = purgeKey;
-	return onMainThread([db, key]() -> Future<Void> {
-		db->checkDeferredError();
-		return db->waitPurgeGranulesComplete(key);
+	return onMainThread([rawDb, key]() -> Future<Void> {
+		rawDb->checkDeferredError();
+		return rawDb->waitPurgeGranulesComplete(key);
 	});
 }
 
 ThreadFuture<bool> ThreadSafeTenant::blobbifyRange(const KeyRangeRef& keyRange) {
-	DatabaseContext* db = this->db->db;
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	DatabaseContext* rawDb = database->unsafeGetPtr();
 	KeyRange range = keyRange;
-	return onMainThread([=]() -> Future<bool> {
-		db->checkDeferredError();
-		db->addref();
-		return db->blobbifyRange(range, Reference<Tenant>::addRef(tenant));
+	Tenant* tenantPtr = checkedTenant();
+	return onMainThread([rawDb, range, tenantPtr]() -> Future<bool> {
+		rawDb->checkDeferredError();
+		rawDb->addref();
+		return rawDb->blobbifyRange(range, Reference<Tenant>::addRef(tenantPtr));
 	});
 }
 
 ThreadFuture<bool> ThreadSafeTenant::blobbifyRangeBlocking(const KeyRangeRef& keyRange) {
-	DatabaseContext* db = this->db->db;
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	DatabaseContext* rawDb = database->unsafeGetPtr();
 	KeyRange range = keyRange;
-	return onMainThread([=]() -> Future<bool> {
-		db->checkDeferredError();
-		db->addref();
-		return db->blobbifyRangeBlocking(range, Reference<Tenant>::addRef(tenant));
+	Tenant* tenantPtr = checkedTenant();
+	return onMainThread([rawDb, range, tenantPtr]() -> Future<bool> {
+		rawDb->checkDeferredError();
+		rawDb->addref();
+		return rawDb->blobbifyRangeBlocking(range, Reference<Tenant>::addRef(tenantPtr));
 	});
 }
 
 ThreadFuture<bool> ThreadSafeTenant::unblobbifyRange(const KeyRangeRef& keyRange) {
-	DatabaseContext* db = this->db->db;
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	DatabaseContext* rawDb = database->unsafeGetPtr();
 	KeyRange range = keyRange;
-	return onMainThread([=]() -> Future<bool> {
-		db->checkDeferredError();
-		db->addref();
-		return db->unblobbifyRange(range, Reference<Tenant>::addRef(tenant));
+	Tenant* tenantPtr = checkedTenant();
+	return onMainThread([rawDb, range, tenantPtr]() -> Future<bool> {
+		rawDb->checkDeferredError();
+		rawDb->addref();
+		return rawDb->unblobbifyRange(range, Reference<Tenant>::addRef(tenantPtr));
 	});
 }
 
 ThreadFuture<Standalone<VectorRef<KeyRangeRef>>> ThreadSafeTenant::listBlobbifiedRanges(const KeyRangeRef& keyRange,
                                                                                         int rangeLimit) {
-	DatabaseContext* db = this->db->db;
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	DatabaseContext* rawDb = database->unsafeGetPtr();
 	KeyRange range = keyRange;
-	return onMainThread([=]() -> Future<Standalone<VectorRef<KeyRangeRef>>> {
-		db->checkDeferredError();
-		db->addref();
-		return db->listBlobbifiedRanges(range, rangeLimit, Reference<Tenant>::addRef(tenant));
+	Tenant* tenantPtr = checkedTenant();
+	return onMainThread([rawDb, range, rangeLimit, tenantPtr]() -> Future<Standalone<VectorRef<KeyRangeRef>>> {
+		rawDb->checkDeferredError();
+		rawDb->addref();
+		return rawDb->listBlobbifiedRanges(range, rangeLimit, Reference<Tenant>::addRef(tenantPtr));
 	});
 }
 
 ThreadFuture<Version> ThreadSafeTenant::verifyBlobRange(const KeyRangeRef& keyRange, Optional<Version> version) {
-	DatabaseContext* db = this->db->db;
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	DatabaseContext* rawDb = database->unsafeGetPtr();
 	KeyRange range = keyRange;
-	return onMainThread([=]() -> Future<Version> {
-		db->checkDeferredError();
-		db->addref();
-		return db->verifyBlobRange(range, version, Reference<Tenant>::addRef(tenant));
+	Tenant* tenantPtr = checkedTenant();
+	return onMainThread([rawDb, range, version, tenantPtr]() -> Future<Version> {
+		rawDb->checkDeferredError();
+		rawDb->addref();
+		return rawDb->verifyBlobRange(range, version, Reference<Tenant>::addRef(tenantPtr));
 	});
 }
 
 ThreadFuture<bool> ThreadSafeTenant::flushBlobRange(const KeyRangeRef& keyRange,
                                                     bool compact,
                                                     Optional<Version> version) {
-	DatabaseContext* db = this->db->db;
+	Reference<ThreadSafeDatabase> database = checkedDatabase();
+	DatabaseContext* rawDb = database->unsafeGetPtr();
 	KeyRange range = keyRange;
-	return onMainThread([=]() -> Future<bool> {
-		db->checkDeferredError();
-		db->addref();
-		return db->flushBlobRange(range, compact, version, Reference<Tenant>::addRef(tenant));
+	Tenant* tenantPtr = checkedTenant();
+	return onMainThread([rawDb, range, compact, version, tenantPtr]() -> Future<bool> {
+		rawDb->checkDeferredError();
+		rawDb->addref();
+		return rawDb->flushBlobRange(range, compact, version, Reference<Tenant>::addRef(tenantPtr));
 	});
 }
 
 ThreadSafeTenant::~ThreadSafeTenant() {
-	Tenant* t = this->tenant;
-	if (t)
-		onMainThreadVoid([t]() { t->delref(); });
+	close();
+}
+
+void ThreadSafeTenant::close() {
+	if (closed.exchange(true, std::memory_order_acq_rel)) {
+		return;
+	}
+	Reference<ThreadSafeDatabase> database = db;
+	db.clear();
+	if (database) {
+		database->unregisterTenant(this);
+	}
+	Tenant* toRelease = tenant;
+	tenant = nullptr;
+	if (!toRelease) {
+		return;
+	}
+	scheduleThreadSafeCleanup([toRelease]() { toRelease->delref(); });
+}
+
+Tenant* ThreadSafeTenant::checkedTenant() const {
+	if (closed.load(std::memory_order_acquire) || tenant == nullptr) {
+		throw network_not_setup();
+	}
+	return tenant;
+}
+
+Reference<ThreadSafeDatabase> ThreadSafeTenant::checkedDatabase() const {
+	Reference<ThreadSafeDatabase> database = db;
+	if (!database || closed.load(std::memory_order_acquire)) {
+		throw network_not_setup();
+	}
+	return database;
 }
 
 ThreadSafeTransaction::ThreadSafeTransaction(DatabaseContext* cx,
+                                             Reference<ThreadSafeDatabase> owningDatabase,
                                              ISingleThreadTransaction::Type type,
                                              Optional<TenantName> tenantName,
                                              Tenant* tenantPtr)
-  : tenantName(tenantName), initialized(std::make_shared<std::atomic_bool>(false)) {
+  : tenantName(tenantName), initialized(std::make_shared<std::atomic_bool>(false)),
+    owningDatabase(std::move(owningDatabase)) {
 	// Allocate memory for the transaction from this thread (so the pointer is known for subsequent method calls)
 	// but run its constructor on the main thread
 
@@ -368,7 +600,24 @@ ThreadSafeTransaction::ThreadSafeTransaction(DatabaseContext* cx,
 	// because the reference count of the DatabaseContext is solely managed from the main thread.  If cx is destructed
 	// immediately after this call, it will defer the DatabaseContext::delref (and onMainThread preserves the order of
 	// these operations).
+	auto cleanupOnFailure = [this, type]() {
+		if (!tr) {
+			return;
+		}
+		if (type == ISingleThreadTransaction::Type::RYW) {
+			ReadYourWritesTransaction::operator delete(static_cast<ReadYourWritesTransaction*>(tr));
+		} else {
+			delete tr;
+		}
+		tr = nullptr;
+	};
 	auto tr = this->tr = ISingleThreadTransaction::allocateOnForeignThread(type);
+	if (this->owningDatabase && !this->owningDatabase->registerTransaction(this)) {
+		cleanupOnFailure();
+		this->owningDatabase.clear();
+		closed.store(true, std::memory_order_release);
+		throw network_not_setup();
+	}
 	auto init = this->initialized;
 	// No deferred error -- if the construction of the RYW transaction fails, we have no where to put it
 	onMainThreadVoid([tr, cx, type, tenantPtr, init]() {
@@ -394,29 +643,45 @@ ThreadSafeTransaction::ThreadSafeTransaction(DatabaseContext* cx,
 
 // This constructor is only used while refactoring fdbcli and only called from the main thread
 ThreadSafeTransaction::ThreadSafeTransaction(ReadYourWritesTransaction* ryw)
-  : tr(ryw), initialized(std::make_shared<std::atomic_bool>(true)) {
+  : tr(ryw), tenantName(Optional<TenantName>()), initialized(std::make_shared<std::atomic_bool>(true)),
+    owningDatabase(nullptr) {
 	if (tr)
 		tr->addref();
 }
 
 ThreadSafeTransaction::~ThreadSafeTransaction() {
-	ISingleThreadTransaction* tr = this->tr;
-	if (tr)
-		onMainThreadVoid([tr]() { tr->delref(); });
+	close();
+}
+
+void ThreadSafeTransaction::close() {
+	if (closed.exchange(true, std::memory_order_acq_rel)) {
+		return;
+	}
+	Reference<ThreadSafeDatabase> database = owningDatabase;
+	owningDatabase.clear();
+	if (database) {
+		database->unregisterTransaction(this);
+	}
+	ISingleThreadTransaction* toRelease = tr;
+	tr = nullptr;
+	if (!toRelease) {
+		return;
+	}
+	scheduleThreadSafeCleanup([toRelease]() { toRelease->delref(); });
 }
 
 void ThreadSafeTransaction::cancel() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr]() { tr->cancel(); });
 }
 
 void ThreadSafeTransaction::setVersion(Version v) {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr, v]() { tr->setVersion(v); }, tr, &ISingleThreadTransaction::deferredError);
 }
 
 ThreadFuture<Version> ThreadSafeTransaction::getReadVersion() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() -> Future<Version> {
 		tr->checkDeferredError();
 		return tr->getReadVersion();
@@ -426,7 +691,7 @@ ThreadFuture<Version> ThreadSafeTransaction::getReadVersion() {
 ThreadFuture<Optional<Value>> ThreadSafeTransaction::get(const KeyRef& key, bool snapshot) {
 	Key k = key;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, k, snapshot]() -> Future<Optional<Value>> {
 		tr->checkDeferredError();
 		return tr->get(k, Snapshot{ snapshot });
@@ -436,7 +701,7 @@ ThreadFuture<Optional<Value>> ThreadSafeTransaction::get(const KeyRef& key, bool
 ThreadFuture<Key> ThreadSafeTransaction::getKey(const KeySelectorRef& key, bool snapshot) {
 	KeySelector k = key;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, k, snapshot]() -> Future<Key> {
 		tr->checkDeferredError();
 		return tr->getKey(k, Snapshot{ snapshot });
@@ -446,7 +711,7 @@ ThreadFuture<Key> ThreadSafeTransaction::getKey(const KeySelectorRef& key, bool 
 ThreadFuture<int64_t> ThreadSafeTransaction::getEstimatedRangeSizeBytes(const KeyRangeRef& keys) {
 	KeyRange r = keys;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, r]() -> Future<int64_t> {
 		tr->checkDeferredError();
 		return tr->getEstimatedRangeSizeBytes(r);
@@ -457,7 +722,7 @@ ThreadFuture<Standalone<VectorRef<KeyRef>>> ThreadSafeTransaction::getRangeSplit
                                                                                        int64_t chunkSize) {
 	KeyRange r = range;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, r, chunkSize]() -> Future<Standalone<VectorRef<KeyRef>>> {
 		tr->checkDeferredError();
 		return tr->getRangeSplitPoints(r, chunkSize);
@@ -472,7 +737,7 @@ ThreadFuture<RangeResult> ThreadSafeTransaction::getRange(const KeySelectorRef& 
 	KeySelector b = begin;
 	KeySelector e = end;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, b, e, limit, snapshot, reverse]() -> Future<RangeResult> {
 		tr->checkDeferredError();
 		return tr->getRange(b, e, limit, Snapshot{ snapshot }, Reverse{ reverse });
@@ -487,7 +752,7 @@ ThreadFuture<RangeResult> ThreadSafeTransaction::getRange(const KeySelectorRef& 
 	KeySelector b = begin;
 	KeySelector e = end;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, b, e, limits, snapshot, reverse]() -> Future<RangeResult> {
 		tr->checkDeferredError();
 		return tr->getRange(b, e, limits, Snapshot{ snapshot }, Reverse{ reverse });
@@ -504,7 +769,7 @@ ThreadFuture<MappedRangeResult> ThreadSafeTransaction::getMappedRange(const KeyS
 	KeySelector e = end;
 	Key h = mapper;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, b, e, h, limits, snapshot, reverse]() -> Future<MappedRangeResult> {
 		tr->checkDeferredError();
 		return tr->getMappedRange(b, e, h, limits, Snapshot{ snapshot }, Reverse{ reverse });
@@ -514,7 +779,7 @@ ThreadFuture<MappedRangeResult> ThreadSafeTransaction::getMappedRange(const KeyS
 ThreadFuture<Standalone<VectorRef<const char*>>> ThreadSafeTransaction::getAddressesForKey(const KeyRef& key) {
 	Key k = key;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, k]() -> Future<Standalone<VectorRef<const char*>>> {
 		tr->checkDeferredError();
 		return tr->getAddressesForKey(k);
@@ -524,7 +789,7 @@ ThreadFuture<Standalone<VectorRef<const char*>>> ThreadSafeTransaction::getAddre
 ThreadFuture<Standalone<VectorRef<KeyRangeRef>>> ThreadSafeTransaction::getBlobGranuleRanges(
     const KeyRangeRef& keyRange,
     int rangeLimit) {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	KeyRange r = keyRange;
 
 	return onMainThread([=]() -> Future<Standalone<VectorRef<KeyRangeRef>>> {
@@ -546,7 +811,7 @@ ThreadFuture<Standalone<VectorRef<BlobGranuleChunkRef>>> ThreadSafeTransaction::
     Version beginVersion,
     Optional<Version> readVersion,
     Version* readVersionOut) {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	KeyRange r = keyRange;
 
 	return onMainThread(
@@ -567,7 +832,7 @@ ThreadResult<RangeResult> ThreadSafeTransaction::readBlobGranulesFinish(
 	GranuleMaterializeStats stats;
 	auto ret = loadAndMaterializeBlobGranules(files, keyRange, beginVersion, readVersion, granuleContext, stats);
 	if (!ret.isError()) {
-		ISingleThreadTransaction* tr = this->tr;
+		ISingleThreadTransaction* tr = checkedTransaction();
 		onMainThreadVoid([tr, stats]() { tr->addGranuleMaterializeStats(stats); });
 	}
 	return ret;
@@ -577,7 +842,7 @@ ThreadFuture<Standalone<VectorRef<BlobGranuleSummaryRef>>> ThreadSafeTransaction
     const KeyRangeRef& keyRange,
     Optional<Version> summaryVersion,
     int rangeLimit) {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	KeyRange r = keyRange;
 
 	return onMainThread([=]() -> Future<Standalone<VectorRef<BlobGranuleSummaryRef>>> {
@@ -589,12 +854,12 @@ ThreadFuture<Standalone<VectorRef<BlobGranuleSummaryRef>>> ThreadSafeTransaction
 void ThreadSafeTransaction::addReadConflictRange(const KeyRangeRef& keys) {
 	KeyRange r = keys;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr, r]() { tr->addReadConflictRange(r); }, tr, &ISingleThreadTransaction::deferredError);
 }
 
 void ThreadSafeTransaction::makeSelfConflicting() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr]() { tr->makeSelfConflicting(); }, tr, &ISingleThreadTransaction::deferredError);
 }
 
@@ -602,7 +867,7 @@ void ThreadSafeTransaction::atomicOp(const KeyRef& key, const ValueRef& value, u
 	Key k = key;
 	Value v = value;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr, k, v, operationType]() { tr->atomicOp(k, v, operationType); },
 	                 tr,
 	                 &ISingleThreadTransaction::deferredError);
@@ -612,14 +877,14 @@ void ThreadSafeTransaction::set(const KeyRef& key, const ValueRef& value) {
 	Key k = key;
 	Value v = value;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr, k, v]() { tr->set(k, v); }, tr, &ISingleThreadTransaction::deferredError);
 }
 
 void ThreadSafeTransaction::clear(const KeyRangeRef& range) {
 	KeyRange r = range;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr, r]() { tr->clear(r); }, tr, &ISingleThreadTransaction::deferredError);
 }
 
@@ -627,7 +892,7 @@ void ThreadSafeTransaction::clear(const KeyRef& begin, const KeyRef& end) {
 	Key b = begin;
 	Key e = end;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid(
 	    [tr, b, e]() {
 		    if (b > e)
@@ -642,14 +907,14 @@ void ThreadSafeTransaction::clear(const KeyRef& begin, const KeyRef& end) {
 void ThreadSafeTransaction::clear(const KeyRef& key) {
 	Key k = key;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr, k]() { tr->clear(k); }, tr, &ISingleThreadTransaction::deferredError);
 }
 
 ThreadFuture<Void> ThreadSafeTransaction::watch(const KeyRef& key) {
 	Key k = key;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr, k]() -> Future<Void> {
 		tr->checkDeferredError();
 		return tr->watch(k);
@@ -659,12 +924,12 @@ ThreadFuture<Void> ThreadSafeTransaction::watch(const KeyRef& key) {
 void ThreadSafeTransaction::addWriteConflictRange(const KeyRangeRef& keys) {
 	KeyRange r = keys;
 
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr, r]() { tr->addWriteConflictRange(r); }, tr, &ISingleThreadTransaction::deferredError);
 }
 
 ThreadFuture<Void> ThreadSafeTransaction::commit() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() -> Future<Void> {
 		tr->checkDeferredError();
 		return tr->commit();
@@ -680,7 +945,7 @@ Version ThreadSafeTransaction::getCommittedVersion() {
 }
 
 ThreadFuture<VersionVector> ThreadSafeTransaction::getVersionVector() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() -> Future<VersionVector> {
 		tr->checkDeferredError();
 		return tr->getVersionVector();
@@ -688,7 +953,7 @@ ThreadFuture<VersionVector> ThreadSafeTransaction::getVersionVector() {
 }
 
 ThreadFuture<SpanContext> ThreadSafeTransaction::getSpanContext() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() -> Future<SpanContext> {
 		tr->checkDeferredError();
 		return tr->getSpanContext();
@@ -696,7 +961,7 @@ ThreadFuture<SpanContext> ThreadSafeTransaction::getSpanContext() {
 }
 
 ThreadFuture<double> ThreadSafeTransaction::getTagThrottledDuration() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() -> Future<double> {
 		tr->checkDeferredError();
 		return tr->getTagThrottledDuration();
@@ -704,7 +969,7 @@ ThreadFuture<double> ThreadSafeTransaction::getTagThrottledDuration() {
 }
 
 ThreadFuture<int64_t> ThreadSafeTransaction::getTotalCost() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() -> Future<int64_t> {
 		tr->checkDeferredError();
 		return tr->getTotalCost();
@@ -712,7 +977,7 @@ ThreadFuture<int64_t> ThreadSafeTransaction::getTotalCost() {
 }
 
 ThreadFuture<int64_t> ThreadSafeTransaction::getApproximateSize() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() -> Future<int64_t> {
 		tr->checkDeferredError();
 		return tr->getApproximateSize();
@@ -720,7 +985,7 @@ ThreadFuture<int64_t> ThreadSafeTransaction::getApproximateSize() {
 }
 
 ThreadFuture<Standalone<StringRef>> ThreadSafeTransaction::getVersionstamp() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() -> Future<Standalone<StringRef>> {
 		tr->checkDeferredError();
 		return tr->getVersionstamp();
@@ -733,7 +998,7 @@ void ThreadSafeTransaction::setOption(FDBTransactionOptions::Option option, Opti
 		TraceEvent("UnknownTransactionOption").detail("Option", option);
 		throw invalid_option();
 	}
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	Standalone<Optional<StringRef>> passValue = value;
 
 	// ThreadSafeTransaction is not allowed to do anything with options except pass them through to RYW.
@@ -743,7 +1008,7 @@ void ThreadSafeTransaction::setOption(FDBTransactionOptions::Option option, Opti
 }
 
 ThreadFuture<Void> ThreadSafeTransaction::checkDeferredError() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	return onMainThread([tr]() {
 		try {
 			tr->checkDeferredError();
@@ -756,8 +1021,11 @@ ThreadFuture<Void> ThreadSafeTransaction::checkDeferredError() {
 }
 
 ThreadFuture<Void> ThreadSafeTransaction::onError(Error const& e) {
-	ISingleThreadTransaction* tr = this->tr;
-	return onMainThread([tr, e]() { return tr->onError(e); });
+	ISingleThreadTransaction* tr = checkedTransaction();
+	return onMainThread([tr, e]() {
+		Reference<ISingleThreadTransaction> transactionRef = Reference<ISingleThreadTransaction>::addRef(tr);
+		return holdWhile(transactionRef, tr->onError(e));
+	});
 }
 
 Optional<TenantName> ThreadSafeTransaction::getTenant() {
@@ -765,33 +1033,48 @@ Optional<TenantName> ThreadSafeTransaction::getTenant() {
 }
 
 void ThreadSafeTransaction::operator=(ThreadSafeTransaction&& r) noexcept {
+	if (this == &r) {
+		return;
+	}
 	tr = r.tr;
 	r.tr = nullptr;
 	initialized = std::move(r.initialized);
+	owningDatabase = std::move(r.owningDatabase);
+	closed.store(r.closed.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 ThreadSafeTransaction::ThreadSafeTransaction(ThreadSafeTransaction&& r) noexcept {
 	tr = r.tr;
 	r.tr = nullptr;
 	initialized = std::move(r.initialized);
+	owningDatabase = std::move(r.owningDatabase);
+	closed.store(r.closed.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 void ThreadSafeTransaction::reset() {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr]() { tr->reset(); });
 }
 
 void ThreadSafeTransaction::debugTrace(BaseTraceEvent&& ev) {
 	if (ev.isEnabled()) {
-		ISingleThreadTransaction* tr = this->tr;
+		ISingleThreadTransaction* tr = checkedTransaction();
 		std::shared_ptr<BaseTraceEvent> evPtr = std::make_shared<BaseTraceEvent>(std::move(ev));
 		onMainThreadVoid([tr, evPtr]() { tr->debugTrace(std::move(*evPtr)); });
 	}
 };
 
 void ThreadSafeTransaction::debugPrint(std::string const& message) {
-	ISingleThreadTransaction* tr = this->tr;
+	ISingleThreadTransaction* tr = checkedTransaction();
 	onMainThreadVoid([tr, message]() { tr->debugPrint(message); });
+}
+
+ISingleThreadTransaction* ThreadSafeTransaction::checkedTransaction() const {
+	ISingleThreadTransaction* ptr = tr;
+	if (!ptr) {
+		throw network_not_setup();
+	}
+	return ptr;
 }
 
 extern const char* getSourceVersion();
@@ -861,20 +1144,26 @@ void ThreadSafeApi::runNetwork() {
 	}
 
 	TraceEvent("RunNetworkTerminating");
+	if (TDMetricCollection* metrics = TDMetricCollection::getTDMetrics()) {
+		metrics->metricMap.clear();
+	}
 }
 
 void ThreadSafeApi::stopNetwork() {
+	ThreadSafeDatabase::closeAllDatabases();
 	::stopNetwork();
 }
 
 Reference<IDatabase> ThreadSafeApi::createDatabase(const char* clusterFilePath) {
-	return Reference<IDatabase>(
-	    new ThreadSafeDatabase(ThreadSafeDatabase::ConnectionRecordType::FILE, clusterFilePath, apiVersion.version()));
+	auto* raw = new ThreadSafeDatabase(
+	    this, ThreadSafeDatabase::ConnectionRecordType::FILE, clusterFilePath, apiVersion.version());
+	return Reference<IDatabase>(raw);
 }
 
 Reference<IDatabase> ThreadSafeApi::createDatabaseFromConnectionString(const char* connectionString) {
-	return Reference<IDatabase>(new ThreadSafeDatabase(
-	    ThreadSafeDatabase::ConnectionRecordType::CONNECTION_STRING, connectionString, apiVersion.version()));
+	auto* raw = new ThreadSafeDatabase(
+	    this, ThreadSafeDatabase::ConnectionRecordType::CONNECTION_STRING, connectionString, apiVersion.version());
+	return Reference<IDatabase>(raw);
 }
 
 void ThreadSafeApi::addNetworkThreadCompletionHook(void (*hook)(void*), void* hookParameter) {

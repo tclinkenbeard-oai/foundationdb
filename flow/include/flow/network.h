@@ -219,6 +219,8 @@ public:
 	virtual void stop() = 0;
 	// Terminate the program
 
+	virtual bool isStopped() const = 0;
+
 	virtual void addStopCallback(std::function<void()> fn) = 0;
 	// Calls `fn` when stop() is called.
 	// addStopCallback can be called more than once, and each added `fn` will be run once.

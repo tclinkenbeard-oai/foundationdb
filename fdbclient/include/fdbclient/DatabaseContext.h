@@ -30,6 +30,7 @@
 #include "flow/genericactors.actor.h"
 #include <vector>
 #include <unordered_map>
+#include <atomic>
 #pragma once
 
 #include "fdbclient/FDBTypes.h"
@@ -277,6 +278,7 @@ public:
 	                       IsSwitchable = IsSwitchable::False);
 
 	~DatabaseContext();
+	void shutdown();
 
 	// Constructs a new copy of this DatabaseContext from the parameters of this DatabaseContext
 	Database clone() const {
@@ -396,6 +398,7 @@ public:
 
 	Error deferredError;
 	LockAware lockAware{ LockAware::False };
+	std::atomic<bool> shutdownStarted{ false };
 
 	bool isError() const { return deferredError.code() != invalid_error_code; }
 

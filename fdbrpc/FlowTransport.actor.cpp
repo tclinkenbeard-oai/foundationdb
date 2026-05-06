@@ -1763,6 +1763,70 @@ FlowTransport::~FlowTransport() {
 	delete self;
 }
 
+ACTOR Future<Void> waitForTransportShutdown(std::vector<Future<Void>> pending, int pendingCount) {
+	wait(waitForAllReady(pending));
+	for (auto& f : pending) {
+		if (f.isError()) {
+			auto err = f.getError();
+			if (err.code() != error_code_actor_cancelled) {
+				throw err;
+			}
+		}
+	}
+	TraceEvent("FlowTransportShutdownComplete").detail("PendingFutures", pendingCount);
+	return Void();
+}
+
+Future<Void> FlowTransport::shutdown() {
+	auto cancelFuture = [](Future<Void>& f) {
+		if (f.isValid()) {
+			f.cancel();
+		}
+	};
+
+	std::vector<Future<Void>> pending;
+	TraceEvent("FlowTransportShutdownBegin")
+	    .detail("Peers", self->peers.size())
+	    .detail("Listeners", self->listeners.size())
+	    .detail("OrderedAddresses", self->orderedAddresses.size());
+	pending.reserve(self->listeners.size() + self->peers.size());
+	for (auto& listener : self->listeners) {
+		if (listener.isValid()) {
+			listener.cancel();
+			pending.push_back(std::move(listener));
+		}
+	}
+	self->listeners.clear();
+	cancelFuture(self->multiVersionCleanup);
+	cancelFuture(self->pingLogger);
+	cancelFuture(self->publicKeyFileWatch);
+
+	std::vector<Reference<Peer>> peers;
+	peers.reserve(self->peers.size());
+	for (auto& kv : self->peers) {
+		peers.push_back(kv.second);
+	}
+	self->peers.clear();
+	self->orderedAddresses.clear();
+	self->closedPeers.clear();
+
+	for (auto& peer : peers) {
+		peer->resetConnection.trigger();
+		peer->resetPing.trigger();
+		if (peer->connect.isValid()) {
+			peer->connect.cancel();
+			pending.push_back(std::move(peer->connect));
+		}
+		if (peer->disconnect.canBeSet()) {
+			peer->disconnect.sendError(actor_cancelled());
+		}
+		peer->unsent.discardAll();
+	}
+
+	auto pendingCount = pending.size();
+	return waitForTransportShutdown(std::move(pending), pendingCount);
+}
+
 void FlowTransport::initMetrics() {
 	self->initMetrics();
 }

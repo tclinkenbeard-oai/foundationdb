@@ -36,6 +36,10 @@ Counter::Counter(std::string const& name, CounterCollection& collection, bool sk
 	collection.addCounter(this);
 }
 
+Counter::~Counter() {
+	remove();
+}
+
 void Counter::operator+=(Value delta) {
 	if (!delta)
 		return; //< Otherwise last_event will be reset
@@ -87,6 +91,22 @@ void Counter::clear() {
 	interval_start_value = 0;
 
 	metric = 0;
+}
+
+void Counter::remove() {
+	if (metricRemoved) {
+		return;
+	}
+	metricRemoved = true;
+	auto metricPtr = &metric;
+	if (!metricPtr->ref) {
+		return;
+	}
+	TDMetricCollection* collection = TDMetricCollection::getTDMetrics();
+	if (!collection) {
+		return;
+	}
+	collection->metricMap.erase(metricPtr->ref->metricName);
 }
 
 void CounterCollection::logToTraceEvent(TraceEvent& te) {

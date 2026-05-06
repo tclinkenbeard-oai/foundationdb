@@ -183,6 +183,7 @@ public:
 	}
 	void onMainThread(Promise<Void>&& signal, TaskPriority taskID) override;
 	bool isOnMainThread() const override { return thread_network == this; }
+	bool isStopped() const override { return stopped.load(std::memory_order_acquire); }
 	void stop() override {
 		if (thread_network == this)
 			stopImmediately();
@@ -1880,8 +1881,8 @@ ACTOR static Future<std::vector<NetworkAddress>> resolveTCPEndpoint_impl(Net2* s
 
 		    std::vector<NetworkAddress> addrs;
 		    for (const auto& entry : results) {
-					auto endpoint = entry.endpoint();
-					auto addr = endpoint.address();
+			    auto endpoint = entry.endpoint();
+			    auto addr = endpoint.address();
 			    if (addr.is_v6()) {
 				    // IPV6 loopback might not be supported, only return IPV6 address
 				    if (!addr.is_loopback()) {
@@ -1890,7 +1891,7 @@ ACTOR static Future<std::vector<NetworkAddress>> resolveTCPEndpoint_impl(Net2* s
 			    } else {
 				    addrs.emplace_back(addr.to_v4().to_uint(), endpoint.port());
 			    }
-				}
+		    }
 
 		    if (addrs.empty()) {
 			    promise.sendError(lookup_failed());
@@ -2088,7 +2089,7 @@ void ASIOReactor::react() {
 }
 
 void ASIOReactor::wake() {
-	 boost::asio::post(ios, nullCompletionHandler);
+	boost::asio::post(ios, nullCompletionHandler);
 }
 
 } // namespace N2

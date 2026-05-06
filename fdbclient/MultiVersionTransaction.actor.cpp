@@ -27,6 +27,7 @@
 #include "fdbclient/json_spirit/json_spirit_writer_template.h"
 #include "fdbclient/json_spirit/json_spirit_value.h"
 #include "flow/ThreadHelper.actor.h"
+#include "flow/TDMetric.actor.h"
 #include "flow/Trace.h"
 #ifdef ADDRESS_SANITIZER
 #include <sanitizer/lsan_interface.h>
@@ -3259,6 +3260,9 @@ void MultiVersionApi::runNetwork() {
 
 	TraceEvent("MultiVersionRunNetworkTerminating");
 	closeTraceFile();
+	if (TDMetricCollection* metrics = TDMetricCollection::getTDMetrics()) {
+		metrics->metricMap.clear();
+	}
 }
 
 void MultiVersionApi::stopNetwork() {

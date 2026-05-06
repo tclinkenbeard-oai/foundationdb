@@ -36,6 +36,7 @@
 
 #include "fdbclient/Knobs.h"
 #include "flow/CodeProbe.h"
+#include "flow/ThreadHelper.actor.h"
 #include "fmt/format.h"
 
 #include "fdbclient/FDBOptions.g.h"
@@ -55,6 +56,7 @@
 #include "fdbclient/CoordinationInterface.h"
 #include "fdbclient/CommitTransaction.h"
 #include "fdbclient/DatabaseContext.h"
+#include "fdbclient/ThreadSafeTransaction.h"
 #include "fdbclient/GlobalConfig.actor.h"
 #include "fdbclient/IKnobCollection.h"
 #include "fdbclient/JsonBuilder.h"
@@ -2743,6 +2745,10 @@ void runNetwork() {
 
 	if (networkOptions.traceDirectory.present())
 		systemMonitor();
+
+	if (TDMetricCollection* metrics = TDMetricCollection::getTDMetrics()) {
+		metrics->metricMap.clear();
+	}
 }
 
 void stopNetwork() {
@@ -2750,15 +2756,36 @@ void stopNetwork() {
 		throw network_not_setup();
 
 	TraceEvent("ClientStopNetwork").log();
+	auto clearMetrics = []() {
+		if (TDMetricCollection* metrics = TDMetricCollection::getTDMetrics()) {
+			metrics->metricMap.clear();
+		}
+	};
 
 	if (networkOptions.traceDirectory.present() && networkOptions.runLoopProfilingEnabled) {
 		stopRunLoopProfiler();
 	}
+	ThreadSafeDatabase::closeAllDatabases();
+	beginThreadSafeCleanup();
+	waitForThreadSafeCleanup();
+	if (g_network->global(INetwork::enFlowTransport)) {
+		onMainThread([]() -> Future<Void> { return FlowTransport::transport().shutdown(); }).blockUntilReady();
+	}
+	closeTraceFile();
+	clearMetrics();
 
 	g_network->stop();
 }
 
 void DatabaseContext::updateProxies() {
+	if (!clientInfo) {
+		proxiesLastChange = UID();
+		commitProxies.clear();
+		grvProxies.clear();
+		ssVersionVectorCache.clear();
+		proxyProvisional = false;
+		return;
+	}
 	if (proxiesLastChange == clientInfo->get().id)
 		return;
 	proxiesLastChange = clientInfo->get().id;

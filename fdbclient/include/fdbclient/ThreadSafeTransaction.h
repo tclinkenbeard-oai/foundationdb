@@ -24,11 +24,18 @@
 #include "flow/ProtocolVersion.h"
 #pragma once
 
+#include <atomic>
+#include <unordered_set>
+
 #include "fdbclient/ReadYourWrites.h"
 #include "flow/ThreadHelper.actor.h"
 #include "fdbclient/ClusterInterface.h"
 #include "fdbclient/IClientApi.h"
 #include "fdbclient/ISingleThreadTransaction.h"
+
+class ThreadSafeApi;
+class ThreadSafeTenant;
+class ThreadSafeTransaction;
 
 // An implementation of IDatabase that serializes operations onto the network thread and interacts with the lower-level
 // client APIs exposed by NativeAPI and ReadYourWrites.
@@ -81,18 +88,42 @@ public:
 private:
 	friend class ThreadSafeTenant;
 	friend class ThreadSafeTransaction;
+	friend class ThreadSafeApi;
+	void close();
 	bool isConfigDB{ false };
 	DatabaseContext* db;
+	ThreadSafeApi* api;
+	bool shutdownOnClose;
+	std::atomic<bool> closed{ false };
+	void registerSelf();
+	void unregisterSelf();
+	bool registerTenant(ThreadSafeTenant*);
+	void unregisterTenant(ThreadSafeTenant*);
+	bool registerTransaction(ThreadSafeTransaction*);
+	void unregisterTransaction(ThreadSafeTransaction*);
+	Mutex childrenLock;
+	std::unordered_set<ThreadSafeTenant*> tenants;
+	std::unordered_set<ThreadSafeTransaction*> transactions;
 
 public: // Internal use only
 	enum class ConnectionRecordType { FILE, CONNECTION_STRING };
-	ThreadSafeDatabase(ConnectionRecordType connectionRecordType, std::string connectionRecord, int apiVersion);
-	ThreadSafeDatabase(DatabaseContext* db) : db(db) {}
+	ThreadSafeDatabase(ThreadSafeApi* api,
+	                   ConnectionRecordType connectionRecordType,
+	                   std::string connectionRecord,
+	                   int apiVersion);
+	ThreadSafeDatabase(DatabaseContext* db) : db(db), api(nullptr), shutdownOnClose(false) { registerSelf(); }
 	DatabaseContext* unsafeGetPtr() const { return db; }
+	static void closeAllDatabases();
+
+private:
+	static Mutex allDatabasesLock;
+	static std::unordered_set<ThreadSafeDatabase*> allDatabases;
 };
 
 class ThreadSafeTenant : public ITenant, ThreadSafeReferenceCounted<ThreadSafeTenant>, NonCopyable {
 public:
+	friend class ThreadSafeDatabase;
+
 	ThreadSafeTenant(Reference<ThreadSafeDatabase> db, TenantName name);
 	~ThreadSafeTenant() override;
 
@@ -115,6 +146,10 @@ public:
 	void delref() override { ThreadSafeReferenceCounted<ThreadSafeTenant>::delref(); }
 
 private:
+	void close();
+	Tenant* checkedTenant() const;
+	Reference<ThreadSafeDatabase> checkedDatabase() const;
+	std::atomic<bool> closed{ false };
 	Reference<ThreadSafeDatabase> db;
 	TenantName name;
 	Tenant* tenant;
@@ -124,7 +159,10 @@ private:
 // lower-level client APIs exposed by ISingleThreadTransaction
 class ThreadSafeTransaction : public ITransaction, ThreadSafeReferenceCounted<ThreadSafeTransaction>, NonCopyable {
 public:
+	friend class ThreadSafeDatabase;
+
 	explicit ThreadSafeTransaction(DatabaseContext* cx,
+	                               Reference<ThreadSafeDatabase> owningDatabase,
 	                               ISingleThreadTransaction::Type type,
 	                               Optional<TenantName> tenantName,
 	                               Tenant* tenantPtr);
@@ -228,7 +266,9 @@ public:
 	Optional<TenantName> getTenant() override;
 
 	// These are to permit use as state variables in actors:
-	ThreadSafeTransaction() : tr(nullptr), initialized(std::make_shared<std::atomic_bool>(false)) {}
+	ThreadSafeTransaction()
+	  : tr(nullptr), tenantName(Optional<TenantName>()), initialized(std::make_shared<std::atomic_bool>(false)),
+	    owningDatabase(nullptr) {}
 	void operator=(ThreadSafeTransaction&& r) noexcept;
 	ThreadSafeTransaction(ThreadSafeTransaction&& r) noexcept;
 
@@ -241,9 +281,14 @@ public:
 	void debugPrint(std::string const& message) override;
 
 private:
+	void close();
+	ISingleThreadTransaction* checkedTransaction() const;
+
 	ISingleThreadTransaction* tr;
 	const Optional<TenantName> tenantName;
 	std::shared_ptr<std::atomic_bool> initialized;
+	Reference<ThreadSafeDatabase> owningDatabase;
+	std::atomic<bool> closed{ false };
 };
 
 // An implementation of IClientApi that serializes operations onto the network thread and interacts with the lower-level
@@ -275,5 +320,8 @@ private:
 	Mutex lock;
 	std::vector<std::pair<void (*)(void*), void*>> threadCompletionHooks;
 };
+
+void beginThreadSafeCleanup();
+void waitForThreadSafeCleanup();
 
 #endif
