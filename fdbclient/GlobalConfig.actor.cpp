@@ -39,6 +39,15 @@ const KeyRef samplingWindow = "visibility/sampling/window"_sr;
 
 GlobalConfig::GlobalConfig(DatabaseContext* cx) : cx(cx), lastUpdate(0) {}
 
+GlobalConfig::~GlobalConfig() {
+	if (_forward.isValid()) {
+		_forward.cancel();
+	}
+	if (_updater.isValid()) {
+		_updater.cancel();
+	}
+}
+
 void GlobalConfig::applyChanges(Transaction& tr,
                                 const VectorRef<KeyValueRef>& insertions,
                                 const VectorRef<KeyRangeRef>& clears) {

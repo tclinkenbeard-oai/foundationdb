@@ -1919,6 +1919,12 @@ DatabaseContext::~DatabaseContext() {
 	clientDBInfoMonitor.cancel();
 	monitorTssInfoChange.cancel();
 	tssMismatchHandler.cancel();
+	if (clientStatusUpdater.actor.isValid()) {
+		clientStatusUpdater.actor.cancel();
+	}
+	if (globalConfig) {
+		globalConfig.reset();
+	}
 	initializeChangeFeedCache = Void();
 	storage = nullptr;
 	changeFeedStorageCommitter = Void();

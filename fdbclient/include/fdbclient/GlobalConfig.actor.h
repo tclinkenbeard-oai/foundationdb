@@ -69,6 +69,7 @@ public:
 	// Requires a database pointer to allow global configuration to run
 	// transactions on the database.
 	explicit GlobalConfig(DatabaseContext* cx);
+	~GlobalConfig();
 
 	// Requires an AsyncVar object to watch for changes on. The ClientDBInfo pointer
 	// should point to a ClientDBInfo object which will contain the updated
