@@ -21,6 +21,8 @@ package com.apple.foundationdb;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.extension.BeforeAllCallback;
@@ -45,6 +47,9 @@ import org.junit.jupiter.api.extension.ExtensionContext;
  */
 public class RequiresDatabase implements ExecutionCondition, BeforeAllCallback {
 	private static boolean networkOptionsSet = false;
+	private static final int DATABASE_PROBE_TIMEOUT_MILLIS = 100;
+	private static final long DATABASE_PROBE_DEADLINE_NANOS = TimeUnit.SECONDS.toNanos(5);
+	private static final long DATABASE_PROBE_RETRY_DELAY_MILLIS = 50;
 
 	public static boolean canRunIntegrationTest() {
 		String prop = System.getProperty("run.integration.tests");
@@ -90,19 +95,37 @@ public class RequiresDatabase implements ExecutionCondition, BeforeAllCallback {
 		}
 
 		try (Database db = fdb.open()) {
-			db.run(tr -> {
-				tr.options().setTimeout(100);
-				CompletableFuture<byte[]> future = tr.get("test".getBytes());
+			final long deadline = System.nanoTime() + DATABASE_PROBE_DEADLINE_NANOS;
+			while (true) {
 				try {
-					return future.join();
-				} catch (FDBException e) {
-					if (e.getCode() == 1031) {
-						Assertions.fail("Test " + context.getDisplayName() +
-						                " failed to start: cannot to database within timeout");
+					db.run(tr -> {
+						tr.options().setTimeout(DATABASE_PROBE_TIMEOUT_MILLIS);
+						CompletableFuture<byte[]> future = tr.get("test".getBytes());
+						return future.join();
+					});
+					return;
+				} catch (CompletionException e) {
+					if (!isTransactionTimeout(e)) {
+						throw e;
 					}
-					throw e;
+					if (System.nanoTime() >= deadline) {
+						Assertions.fail("Test " + context.getDisplayName() +
+						                " failed to start: cannot connect to database within timeout");
+					}
+					Thread.sleep(DATABASE_PROBE_RETRY_DELAY_MILLIS);
 				}
-			});
+			}
 		}
+	}
+
+	private static boolean isTransactionTimeout(Throwable error) {
+		Throwable current = error;
+		while (current != null) {
+			if (current instanceof FDBException && ((FDBException) current).getCode() == 1031) {
+				return true;
+			}
+			current = current.getCause();
+		}
+		return false;
 	}
 }
