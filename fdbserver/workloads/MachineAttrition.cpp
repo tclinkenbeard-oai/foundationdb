@@ -105,7 +105,11 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		suspendDuration = getOption(options, "suspendDuration"_sr, suspendDuration);
 		liveDuration = getOption(options, "liveDuration"_sr, liveDuration);
 		reboot = getOption(options, "reboot"_sr, reboot);
-		killDc = getOption(options, "killDc"_sr, g_network->isSimulated() && deterministicRandom()->random01() < 0.25);
+		bool machineCountSpecified =
+		    hasOption(options, "machinesToKill"_sr) || hasOption(options, "machinesToLeave"_sr);
+		bool randomKillDc = g_network->isSimulated() && deterministicRandom()->random01() < 0.25;
+		bool defaultKillDc = !machineCountSpecified && randomKillDc;
+		killDc = getOption(options, "killDc"_sr, defaultKillDc);
 		killMachine = getOption(options, "killMachine"_sr, killMachine);
 		killDatahall = getOption(options, "killDatahall"_sr, killDatahall);
 		killProcess = getOption(options, "killProcess"_sr, killProcess);
