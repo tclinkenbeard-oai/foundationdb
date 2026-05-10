@@ -2063,10 +2063,17 @@ void SimulationConfig::setMachineCount(const TestConfig& testConfig) {
 	} else if (db.tLogPolicy && db.tLogPolicy->info() == "data_hall^2 x zoneid^2 x 1") {
 		machine_count = 9;
 	} else {
-		// datacenters+2 so that the configure database workload can configure into three_data_hall
+		// datacenters+2 so that the configure database workload can configure into three_data_hall.
+		// If log anti-quorum is enabled, reserve enough extra machines to recruit the desired number of logs even
+		// while the logs tolerated by the anti-quorum are unavailable. Otherwise a custom configuration like
+		// `log_replicas:=2 log_anti_quorum:=1` can start with exactly three machines, recruit three logs, and then be
+		// unable to recover as soon as one log is unavailable during startup.
+		int minTLogMachinesPerDatacenter = db.getDesiredLogs() + db.tLogWriteAntiQuorum;
+		int datacentersNeedingCapacity =
+		    (db.minDatacentersRequired() > 0 || db.tLogWriteAntiQuorum > 0) ? datacenters : 1;
 		machine_count = std::max(datacenters + 2,
-		                         ((db.minDatacentersRequired() > 0) ? datacenters : 1) *
-		                             std::max(3, db.minZonesRequiredPerDatacenter()));
+		                         datacentersNeedingCapacity *
+		                             std::max({ 3, db.minZonesRequiredPerDatacenter(), minTLogMachinesPerDatacenter }));
 		machine_count = deterministicRandom()->randomInt(
 		    machine_count, std::max(machine_count + 1, extraDatabaseMode == FDBExtraDatabaseMode::Disabled ? 10 : 6));
 		// generateMachineTeamTestConfig set up the number of servers per machine and the number of machines such that
