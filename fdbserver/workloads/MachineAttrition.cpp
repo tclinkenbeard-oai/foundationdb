@@ -31,6 +31,8 @@
 #include "flow/DeterministicRandom.h"
 #include "fdbrpc/SimulatorProcessInfo.h"
 
+#include <algorithm>
+
 static std::set<int> const& normalAttritionErrors() {
 	static std::set<int> s;
 	if (s.empty()) {
@@ -105,7 +107,11 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		suspendDuration = getOption(options, "suspendDuration"_sr, suspendDuration);
 		liveDuration = getOption(options, "liveDuration"_sr, liveDuration);
 		reboot = getOption(options, "reboot"_sr, reboot);
-		killDc = getOption(options, "killDc"_sr, g_network->isSimulated() && deterministicRandom()->random01() < 0.25);
+		bool machineCountSpecified =
+		    hasOption(options, "machinesToKill"_sr) || hasOption(options, "machinesToLeave"_sr);
+		bool randomKillDc = g_network->isSimulated() && deterministicRandom()->random01() < 0.25;
+		bool defaultKillDc = !machineCountSpecified && randomKillDc;
+		killDc = getOption(options, "killDc"_sr, defaultKillDc);
 		killMachine = getOption(options, "killMachine"_sr, killMachine);
 		killDatahall = getOption(options, "killDatahall"_sr, killDatahall);
 		killProcess = getOption(options, "killProcess"_sr, killProcess);
@@ -166,6 +172,17 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 			    all[i]->startingClass != ProcessClass::TesterClass)
 				machines.push_back(all[i]);
 		return machines;
+	}
+
+	static std::set<Optional<Standalone<StringRef>>>& targetedMachineZones() {
+		static std::set<Optional<Standalone<StringRef>>> zones;
+		return zones;
+	}
+
+	int availableMachineCount() const {
+		return std::count_if(machines.begin(), machines.end(), [](LocalityData const& machine) {
+			return !targetedMachineZones().count(machine.zoneId());
+		});
 	}
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
@@ -380,7 +397,14 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 				g_simulator->toggleGlobalSwitchCluster();
 			} else {
 				int killedMachines = 0;
-				while (killedMachines < machinesToKill && machines.size() > machinesToLeave) {
+				while (killedMachines < machinesToKill) {
+					while (!machines.empty() && targetedMachineZones().count(machines.back().zoneId())) {
+						machines.pop_back();
+					}
+					if (availableMachineCount() <= machinesToLeave) {
+						break;
+					}
+
 					TraceEvent("WorkerKillBegin")
 					    .detail("KilledMachines", killedMachines)
 					    .detail("MachinesToKill", machinesToKill)
@@ -408,8 +432,20 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 						}
 					}
 
+					// Another attrition workload may have claimed machines while this workload was waiting.
+					// Re-evaluate the shared target set immediately before selecting a target so duplicate
+					// machine-scoped attrition workloads collectively honor machinesToLeave, even when rebooted
+					// machines later become live again.
+					while (!machines.empty() && targetedMachineZones().count(machines.back().zoneId())) {
+						machines.pop_back();
+					}
+					if (availableMachineCount() <= machinesToLeave) {
+						break;
+					}
+
 					// decide on a machine to kill
 					LocalityData targetMachine = machines.back();
+					targetedMachineZones().insert(targetMachine.zoneId());
 					if (BUGGIFY_WITH_PROB(0.01)) {
 						CODE_PROBE(true, "Marked a zone for maintenance before killing it");
 						co_await setHealthyZone(
