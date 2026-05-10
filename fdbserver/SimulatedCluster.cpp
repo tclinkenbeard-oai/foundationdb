@@ -2061,7 +2061,10 @@ void SimulationConfig::setMachineCount(const TestConfig& testConfig) {
 	} else if (generateFearless) {
 		machine_count = 12;
 	} else if (db.tLogPolicy && db.tLogPolicy->info() == "data_hall^2 x zoneid^2 x 1") {
-		machine_count = 9;
+		// Keep one spare machine per hall instead of running every hall at its minimum viable size.
+		// Data-movement-heavy workloads can otherwise accumulate too much recovery work when one machine in each
+		// hall is temporarily unavailable.
+		machine_count = 12;
 	} else {
 		// datacenters+2 so that the configure database workload can configure into three_data_hall.
 		// If log anti-quorum is enabled, reserve enough extra machines to recruit the desired number of logs even
