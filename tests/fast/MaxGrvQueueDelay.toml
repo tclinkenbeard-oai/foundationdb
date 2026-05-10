@@ -16,4 +16,6 @@ testTitle = 'MaxGrvQueueDelay'
     maxQueueDelayMS = 0
     permissiveMaxQueueDelayMS = 60000
     warmupRequestCount = 1000
+    warmupRoundCount = 5
+    probeBatchSize = 16
     warmupDelay = 0.1

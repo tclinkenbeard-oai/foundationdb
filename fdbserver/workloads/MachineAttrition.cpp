@@ -31,6 +31,8 @@
 #include "flow/DeterministicRandom.h"
 #include "fdbrpc/SimulatorProcessInfo.h"
 
+#include <algorithm>
+
 static std::set<int> const& normalAttritionErrors() {
 	static std::set<int> s;
 	if (s.empty()) {
@@ -175,6 +177,12 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 	static std::set<Optional<Standalone<StringRef>>>& targetedMachineZones() {
 		static std::set<Optional<Standalone<StringRef>>> zones;
 		return zones;
+	}
+
+	int availableMachineCount() const {
+		return std::count_if(machines.begin(), machines.end(), [](LocalityData const& machine) {
+			return !targetedMachineZones().count(machine.zoneId());
+		});
 	}
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
@@ -393,7 +401,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 					while (!machines.empty() && targetedMachineZones().count(machines.back().zoneId())) {
 						machines.pop_back();
 					}
-					if (machines.size() <= machinesToLeave) {
+					if (availableMachineCount() <= machinesToLeave) {
 						break;
 					}
 
@@ -431,7 +439,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 					while (!machines.empty() && targetedMachineZones().count(machines.back().zoneId())) {
 						machines.pop_back();
 					}
-					if (machines.size() <= machinesToLeave) {
+					if (availableMachineCount() <= machinesToLeave) {
 						break;
 					}
 
