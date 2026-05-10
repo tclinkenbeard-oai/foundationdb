@@ -179,10 +179,24 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		return zones;
 	}
 
+	static std::map<std::pair<int, int>, std::set<Optional<Standalone<StringRef>>>>& targetedMachineZonesByBudget() {
+		static std::map<std::pair<int, int>, std::set<Optional<Standalone<StringRef>>>> zones;
+		return zones;
+	}
+
+	std::set<Optional<Standalone<StringRef>>>& budgetedTargetMachineZones() const {
+		return targetedMachineZonesByBudget()[{ machinesToKill, machinesToLeave }];
+	}
+
 	int availableMachineCount() const {
 		return std::count_if(machines.begin(), machines.end(), [](LocalityData const& machine) {
 			return !targetedMachineZones().count(machine.zoneId());
 		});
+	}
+
+	bool canTargetMachine(LocalityData const& machine) const {
+		return !targetedMachineZones().count(machine.zoneId()) &&
+		       budgetedTargetMachineZones().size() < machinesToKill;
 	}
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
@@ -398,7 +412,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 			} else {
 				int killedMachines = 0;
 				while (killedMachines < machinesToKill) {
-					while (!machines.empty() && targetedMachineZones().count(machines.back().zoneId())) {
+					while (!machines.empty() && !canTargetMachine(machines.back())) {
 						machines.pop_back();
 					}
 					if (availableMachineCount() <= machinesToLeave) {
@@ -436,7 +450,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 					// Re-evaluate the shared target set immediately before selecting a target so duplicate
 					// machine-scoped attrition workloads collectively honor machinesToLeave, even when rebooted
 					// machines later become live again.
-					while (!machines.empty() && targetedMachineZones().count(machines.back().zoneId())) {
+					while (!machines.empty() && !canTargetMachine(machines.back())) {
 						machines.pop_back();
 					}
 					if (availableMachineCount() <= machinesToLeave) {
@@ -446,6 +460,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 					// decide on a machine to kill
 					LocalityData targetMachine = machines.back();
 					targetedMachineZones().insert(targetMachine.zoneId());
+					budgetedTargetMachineZones().insert(targetMachine.zoneId());
 					if (BUGGIFY_WITH_PROB(0.01)) {
 						CODE_PROBE(true, "Marked a zone for maintenance before killing it");
 						co_await setHealthyZone(
