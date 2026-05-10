@@ -188,6 +188,13 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		return targetedMachineZonesByBudget()[{ machinesToKill, machinesToLeave }];
 	}
 
+	int budgetedTargetMachineCount() const {
+		auto const& targets = budgetedTargetMachineZones();
+		return std::count_if(machines.begin(), machines.end(), [&targets](LocalityData const& machine) {
+			return targets.count(machine.zoneId());
+		});
+	}
+
 	int availableMachineCount() const {
 		return std::count_if(machines.begin(), machines.end(), [](LocalityData const& machine) {
 			return !targetedMachineZones().count(machine.zoneId());
@@ -196,7 +203,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 
 	bool canTargetMachine(LocalityData const& machine) const {
 		return !targetedMachineZones().count(machine.zoneId()) &&
-		       budgetedTargetMachineZones().size() < machinesToKill;
+		       budgetedTargetMachineCount() < machinesToKill;
 	}
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
