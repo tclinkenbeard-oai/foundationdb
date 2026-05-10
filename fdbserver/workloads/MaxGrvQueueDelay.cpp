@@ -37,6 +37,8 @@ struct MaxGrvQueueDelayWorkload : TestWorkload {
 	int64_t maxQueueDelayMS;
 	int64_t permissiveMaxQueueDelayMS;
 	int warmupRequestCount;
+	int warmupRoundCount;
+	int probeBatchSize;
 	double warmupDelay;
 	double startAfter;
 	double testTimeout;
@@ -55,7 +57,9 @@ struct MaxGrvQueueDelayWorkload : TestWorkload {
 		minRejected = getOption(options, "minRejected"_sr, 1);
 		maxQueueDelayMS = getOption(options, "maxQueueDelayMS"_sr, int64_t{ 0 });
 		permissiveMaxQueueDelayMS = getOption(options, "permissiveMaxQueueDelayMS"_sr, int64_t{ 60000 });
-		warmupRequestCount = getOption(options, "warmupRequestCount"_sr, 0);
+		warmupRequestCount = std::max(0, getOption(options, "warmupRequestCount"_sr, 0));
+		warmupRoundCount = std::max(1, getOption(options, "warmupRoundCount"_sr, 1));
+		probeBatchSize = std::max(1, getOption(options, "probeBatchSize"_sr, requestCount));
 		warmupDelay = getOption(options, "warmupDelay"_sr, 0.0);
 		startAfter = getOption(options, "startAfter"_sr, 5.0);
 		testTimeout = getOption(options, "testTimeout"_sr, 30.0);
@@ -72,6 +76,8 @@ struct MaxGrvQueueDelayWorkload : TestWorkload {
 		    .detail("MaxQueueDelayMS", maxQueueDelayMS)
 		    .detail("PermissiveMaxQueueDelayMS", permissiveMaxQueueDelayMS)
 		    .detail("WarmupRequestCount", warmupRequestCount)
+		    .detail("WarmupRoundCount", warmupRoundCount)
+		    .detail("ProbeBatchSize", probeBatchSize)
 		    .detail("WarmupDelay", warmupDelay)
 		    .detail("StartAfter", startAfter)
 		    .detail("TestTimeout", testTimeout);
@@ -154,36 +160,44 @@ struct MaxGrvQueueDelayWorkload : TestWorkload {
 		}
 
 		std::vector<Future<ErrorOr<Version>>> warmupFutures;
-		warmupFutures.reserve(warmupRequestCount);
-		for (int i = 0; i < warmupRequestCount; ++i) {
-			warmupFutures.push_back(errorOr(getReadVersion(cx, Optional<int64_t>())));
-		}
-		if (warmupDelay > 0.0) {
-			co_await delay(warmupDelay);
-		}
+		warmupFutures.reserve(warmupRequestCount * warmupRoundCount);
 
-		std::vector<Future<ErrorOr<Version>>> futures;
-		futures.reserve(requestCount);
-		for (int i = 0; i < requestCount; ++i) {
-			++requests;
-			futures.push_back(errorOr(getReadVersion(cx, Optional<int64_t>(maxQueueDelayMS))));
-		}
+		int probesRemaining = requestCount;
+		for (int round = 0; round < warmupRoundCount && probesRemaining > 0 &&
+		                    rejected.getValue() < minRejected;
+		     ++round) {
+			for (int i = 0; i < warmupRequestCount; ++i) {
+				warmupFutures.push_back(errorOr(getReadVersion(cx, Optional<int64_t>())));
+			}
+			if (warmupDelay > 0.0) {
+				co_await delay(warmupDelay);
+			}
 
-		co_await waitForAll(futures);
+			int probesThisRound = std::min(probeBatchSize, probesRemaining);
+			std::vector<Future<ErrorOr<Version>>> probeFutures;
+			probeFutures.reserve(probesThisRound);
+			for (int i = 0; i < probesThisRound; ++i) {
+				++requests;
+				probeFutures.push_back(errorOr(getReadVersion(cx, Optional<int64_t>(maxQueueDelayMS))));
+			}
 
-		for (auto const& f : futures) {
-			ASSERT(f.isReady());
-			ErrorOr<Version> result = f.get();
-			if (!result.isError()) {
-				++successes;
-			} else if (result.getError().code() == error_code_transaction_grv_queue_rejected) {
-				++rejected;
-			} else {
-				++unexpectedErrors;
-				failed = true;
-				TraceEvent(SevError, "MaxGrvQueueDelayUnexpectedError")
-				    .error(result.getError())
-				    .detail("ExpectedError", error_code_transaction_grv_queue_rejected);
+			co_await waitForAll(probeFutures);
+			probesRemaining -= probesThisRound;
+
+			for (auto const& f : probeFutures) {
+				ASSERT(f.isReady());
+				ErrorOr<Version> result = f.get();
+				if (!result.isError()) {
+					++successes;
+				} else if (result.getError().code() == error_code_transaction_grv_queue_rejected) {
+					++rejected;
+				} else {
+					++unexpectedErrors;
+					failed = true;
+					TraceEvent(SevError, "MaxGrvQueueDelayUnexpectedError")
+					    .error(result.getError())
+					    .detail("ExpectedError", error_code_transaction_grv_queue_rejected);
+				}
 			}
 		}
 
