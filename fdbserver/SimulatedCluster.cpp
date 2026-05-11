@@ -2064,16 +2064,20 @@ void SimulationConfig::setMachineCount(const TestConfig& testConfig) {
 		machine_count = 9;
 	} else {
 		// datacenters+2 so that the configure database workload can configure into three_data_hall.
-		// If log anti-quorum is enabled, reserve enough extra machines to recruit the desired number of logs even
-		// while the logs tolerated by the anti-quorum are unavailable. Otherwise a custom configuration like
-		// `log_replicas:=2 log_anti_quorum:=1` can start with exactly three machines, recruit three logs, and then be
-		// unable to recover as soon as one log is unavailable during startup.
+		// If log anti-quorum is enabled, keep enough room both for the tlog policy itself and for a full-sized normal
+		// topology. Anti-quorum configurations can transiently require every recruited tlog during recovery, so small
+		// class-assigned topologies are especially prone to wedging while the starting configuration is still settling.
+		// The common duplicated machine-attrition workloads can target ten machines while leaving three alive; reserve
+		// one additional machine so anti-quorum configurations still have a spare after those kills complete.
 		int minTLogMachinesPerDatacenter = db.getDesiredLogs() + db.tLogWriteAntiQuorum;
 		int datacentersNeedingCapacity =
 		    (db.minDatacentersRequired() > 0 || db.tLogWriteAntiQuorum > 0) ? datacenters : 1;
-		machine_count = std::max(datacenters + 2,
-		                         datacentersNeedingCapacity *
-		                             std::max({ 3, db.minZonesRequiredPerDatacenter(), minTLogMachinesPerDatacenter }));
+		int antiQuorumMachineFloor =
+		    db.tLogWriteAntiQuorum > 0 ? (extraDatabaseMode == FDBExtraDatabaseMode::Disabled ? 14 : 6) : 0;
+		machine_count = std::max({ datacenters + 2,
+		                           datacentersNeedingCapacity *
+		                               std::max({ 3, db.minZonesRequiredPerDatacenter(), minTLogMachinesPerDatacenter }),
+		                           antiQuorumMachineFloor });
 		machine_count = deterministicRandom()->randomInt(
 		    machine_count, std::max(machine_count + 1, extraDatabaseMode == FDBExtraDatabaseMode::Disabled ? 10 : 6));
 		// generateMachineTeamTestConfig set up the number of servers per machine and the number of machines such that
