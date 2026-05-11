@@ -10,6 +10,7 @@ Checks: >
   modernize-use-override,
   modernize-use-using,
   performance-for-range-copy,
+  performance-move-const-arg,
   readability-container-contains,
   readability-const-return-type,
   readability-container-size-empty,

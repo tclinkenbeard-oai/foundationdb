@@ -277,13 +277,13 @@ function(add_flow_target)
                     ${CMAKE_SOURCE_DIR}/flow/actorcompiler_py/compare_actor_output.py
                     "${cs_out_file}" "${py_out_file}"
             COMMAND ${CMAKE_COMMAND} -E copy "${py_out_file}" "${out_file}"
-            DEPENDS "${in_file}" actorcompiler
+            DEPENDS "${in_file}" actorcompiler ${ACTORCOMPILER_PY_SRCS} ${ACTORCOMPILER_LEGACY_SRCS}
             COMMENT "Compile and compare actor: ${src}")
         else()
           add_custom_command(OUTPUT "${out_file}"
             COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_SOURCE_DIR}"
                     ${ACTORCOMPILER_COMMAND} "${in_file}" "${out_file}" ${actor_compiler_flags}
-            DEPENDS "${in_file}" actorcompiler
+            DEPENDS "${in_file}" actorcompiler ${ACTORCOMPILER_PY_SRCS} ${ACTORCOMPILER_LEGACY_SRCS}
             COMMENT "Compile actor: ${src}")
         endif()
       endif()

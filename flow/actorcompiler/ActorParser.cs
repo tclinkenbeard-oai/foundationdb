@@ -325,7 +325,8 @@ namespace actorcompiler
         {
             writer.NewLine = "\n";
             writer.WriteLine("#define POST_ACTOR_COMPILER 1");
-            int outLine = 1;
+            writer.WriteLine("// NOLINTBEGIN(performance-move-const-arg)");
+            int outLine = 2;
             if (LineNumbersEnabled)
             {
                 writer.WriteLine("#line {0} \"{1}\"", tokens[0].SourceLine, sourceFile);
@@ -408,6 +409,8 @@ namespace actorcompiler
                     outLine += tokens[i].Value.Count(c => c == '\n');
                 }
             }
+            writer.WriteLine();
+            writer.WriteLine("// NOLINTEND(performance-move-const-arg)");
         }
 
         IEnumerable<TokenRange> SplitParameterList( TokenRange toks, string delimiter ) {

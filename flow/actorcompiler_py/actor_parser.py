@@ -338,7 +338,8 @@ class ActorParser:
     def write(self, writer: io.TextIOBase, destFileName: str) -> None:
         ActorCompiler.used_class_names.clear()
         writer.write("#define POST_ACTOR_COMPILER 1\n")
-        outLine = 1
+        writer.write("// NOLINTBEGIN(performance-move-const-arg)\n")
+        outLine = 2
         if self.line_numbers_enabled:
             writer.write(f'#line {self.tokens[0].source_line} "{self.source_file}"\n')
             outLine += 1
@@ -409,6 +410,7 @@ class ActorParser:
                 writer.write(tok.value)
                 outLine += tok.value.count("\n")
             i += 1
+        writer.write("\n// NOLINTEND(performance-move-const-arg)\n")
 
     # Parsing helpers
 
