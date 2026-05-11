@@ -174,6 +174,24 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		return machines;
 	}
 
+	bool isRegionDatacenter(LocalityData const& machine) const {
+		auto const& policy = fdbSimulationPolicyState();
+		if (!policy.primaryDcId.present()) {
+			return true;
+		}
+		if (machine.dcId() == policy.primaryDcId) {
+			return true;
+		}
+		return policy.usableRegions > 1 && policy.remoteDcId.present() && machine.dcId() == policy.remoteDcId;
+	}
+
+	LocalityData const& selectDatacenterTarget() const {
+		auto regionDc = std::find_if(machines.rbegin(), machines.rend(), [this](LocalityData const& machine) {
+			return isRegionDatacenter(machine);
+		});
+		return regionDc == machines.rend() ? machines.back() : *regionDc;
+	}
+
 	static std::set<Optional<Standalone<StringRef>>>& targetedMachineZones() {
 		static std::set<Optional<Standalone<StringRef>>> zones;
 		return zones;
@@ -374,9 +392,11 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 				delayBeforeKill = deterministicRandom()->random01() * meanDelay;
 				co_await delay(delayBeforeKill);
 
-				// decide on a machine to kill
+				// Prefer actual region datacenters over satellite datacenters. Randomly rebooting the only satellite in a
+				// one-satellite fearless layout can leave the cluster in a long-lived degraded state without exercising
+				// the region-failover behavior this mode is intended to cover.
 				ASSERT(!machines.empty());
-				Optional<Standalone<StringRef>> target = machines.back().dcId();
+				Optional<Standalone<StringRef>> target = selectDatacenterTarget().dcId();
 
 				ISimulator::KillType kt = ISimulator::KillType::Reboot;
 				if (!reboot) {
