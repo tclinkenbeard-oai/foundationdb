@@ -15,6 +15,8 @@ service JoshuaProxy {
   rpc StopJob(StopJobRequest) returns (StopJobReply);
   // Returns full failure outputs for a previously submitted ensemble/job.
   rpc GetFailureDetails(GetFailureDetailsRequest) returns (GetFailureDetailsReply);
+  // Returns per-probe coverage counters for a previously submitted ensemble/job.
+  rpc GetCodeProbeStats(GetCodeProbeStatsRequest) returns (GetCodeProbeStatsReply);
   // Lists Joshua ensembles for a selected listing mode.
   rpc ListEnsembles(ListEnsemblesRequest) returns (ListEnsemblesReply);
 }
@@ -34,6 +36,8 @@ message SubmitJobRequest {
   uint64 max_test_failures = 5;
   // Optional TestHarness2 include-test-files regex for targeted ensembles.
   string test_filter = 6;
+  // Whether the submitted source checkout had uncommitted changes.
+  bool dirty = 7;
 }
 
 // Response payload for SubmitJob.
@@ -66,6 +70,8 @@ message UploadCorrectnessTarballReply {
   string blob_name = 2;
   // Number of bytes uploaded.
   uint64 size_bytes = 3;
+  // Base64-encoded MD5 checksum computed by the proxy for the uploaded tarball.
+  string md5_base64 = 4;
 }
 
 // Request payload for GetJobStatus.
@@ -102,6 +108,8 @@ message GetJobStatusReply {
   string stopped = 10;
   // TestHarness2 include-test-files regex persisted on the Joshua ensemble, when provided.
   string test_filter = 11;
+  // Whether the submitted source checkout had uncommitted changes.
+  bool dirty = 12;
   // Current job status.
   oneof status {
     Success success = 2;
@@ -127,6 +135,30 @@ message GetFailureDetailsReply {
   repeated FailureDetail failures = 2;
 }
 
+// Request payload for GetCodeProbeStats.
+message GetCodeProbeStatsRequest {
+  // Job/ensemble ID returned from SubmitJob.
+  string job_id = 1;
+}
+
+// Response payload for GetCodeProbeStats.
+message GetCodeProbeStatsReply {
+  // Joshua job identifier.
+  string joshua_job_id = 1;
+  // Per-probe hit counts recorded for the ensemble.
+  repeated CodeProbeStat code_probes = 2;
+  // Sum of hit counts across all probes.
+  uint64 total_probes_hit = 3;
+  // Number of distinct probes tracked for the ensemble.
+  uint64 total_probes = 4;
+  // Number of probes with a zero hit count.
+  uint64 missed_probes = 5;
+  // Number of non-rare probes with a zero hit count.
+  uint64 missed_nonrare_probes = 6;
+  // Smallest hit count among the tracked probes, when any probes exist.
+  optional uint64 min_probe_hit = 7;
+}
+
 // Full details for an individual failed test result row.
 message FailureDetail {
   // Name of the failing test.
@@ -141,6 +173,20 @@ message FailureDetail {
   string agent = 5;
   // Raw Joshua result code for the failure row (when known).
   sint64 result_code = 6;
+}
+
+// Aggregated coverage count for a single code probe in an ensemble.
+message CodeProbeStat {
+  // Source file containing the probe.
+  string file = 1;
+  // Source line containing the probe.
+  uint64 line = 2;
+  // Probe comment emitted by FoundationDB, when present.
+  string comment = 3;
+  // Whether the probe is marked rare.
+  bool rare = 4;
+  // Number of times the probe was hit across the ensemble.
+  uint64 hit_count = 5;
 }
 
 // Request payload for ListEnsembles.
@@ -182,6 +228,8 @@ message JobStatus {
   string stopped = 11;
   // TestHarness2 include-test-files regex persisted on the Joshua ensemble, when provided.
   string test_filter = 12;
+  // Whether the submitted source checkout had uncommitted changes.
+  bool dirty = 13;
   // Current job status.
   oneof status {
     Success success = 3;
@@ -221,6 +269,8 @@ message Running {
   uint64 tests_passed = 1;
   // Count of tests not yet executed.
   uint64 tests_remaining = 2;
+  // Count of failed tests recorded so far.
+  uint64 tests_failed = 3;
 }
 
 // Job status indicating the job failed.
