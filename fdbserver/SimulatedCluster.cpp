@@ -1916,6 +1916,13 @@ void SimulationConfig::setRegions(const TestConfig& testConfig) {
 		bool useNormalDCsAsSatellites =
 		    datacenters > 4 && testConfig.minimumRegions < 2 && deterministicRandom()->random01() < 0.3;
 		int maxSatelliteLogs = getMaxSatelliteLogs();
+		if (needsSatelliteTLogHeadroom) {
+			// Layouts such as two_satellite_fast and one_satellite_triple can require every recruited satellite tlog
+			// to remain available during recovery. Do not let randomized satellite_logs consume every machine in a
+			// satellite datacenter, or the simulator can generate a topology with no spare process to recruit after
+			// the first overlapping failure.
+			maxSatelliteLogs = std::max(1, maxSatelliteLogs - 1);
+		}
 
 		if (deterministicRandom()->random01() < 0.25)
 			primaryObj["satellite_logs"] = deterministicRandom()->randomInt(1, maxSatelliteLogs + 1);
