@@ -1864,6 +1864,7 @@ void SimulationConfig::setRegions(const TestConfig& testConfig) {
 				CODE_PROBE(true, "Simulated cluster using two satellite fast redundancy mode");
 				primaryObj["satellite_redundancy_mode"] = "two_satellite_fast";
 				remoteObj["satellite_redundancy_mode"] = "two_satellite_fast";
+				needsSatelliteTLogHeadroom = true;
 				break;
 			}
 			case 2: {
@@ -2061,8 +2062,8 @@ void SimulationConfig::setMachineCount(const TestConfig& testConfig) {
 		// is down during failures).
 		machine_count = 16;
 	} else if (generateFearless) {
-		// Triple satellite configurations need enough spare-machine headroom to keep three satellite tlogs available
-		// while duplicated attrition workloads overlap with other failures.
+		// Satellite layouts that can require three live tlogs need enough spare-machine headroom to keep those logs
+		// available while duplicated attrition workloads overlap with other failures.
 		machine_count = needsSatelliteTLogHeadroom ? 24 : 12;
 	} else if (db.tLogPolicy && db.tLogPolicy->info() == "data_hall^2 x zoneid^2 x 1") {
 		machine_count = 9;
