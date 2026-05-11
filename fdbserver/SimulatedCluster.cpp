@@ -1913,8 +1913,8 @@ void SimulationConfig::setRegions(const TestConfig& testConfig) {
 		}
 
 		// Calculate the maximum satellite_logs we can support based on available machines
-		bool useNormalDCsAsSatellites =
-		    datacenters > 4 && testConfig.minimumRegions < 2 && deterministicRandom()->random01() < 0.3;
+		bool useNormalDCsAsSatellites = datacenters > 4 && testConfig.minimumRegions < 2 &&
+		    !needsSatelliteTLogHeadroom && deterministicRandom()->random01() < 0.3;
 		int maxSatelliteLogs = getMaxSatelliteLogs();
 		if (needsSatelliteTLogHeadroom) {
 			// Layouts such as two_satellite_fast and one_satellite_triple can require every recruited satellite tlog
