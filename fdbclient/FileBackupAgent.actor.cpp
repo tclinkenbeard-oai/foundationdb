@@ -5267,6 +5267,7 @@ struct RestoreLogDataPartitionedTaskFunc : RestoreFileTaskFuncBase {
 							txBytes += v.expectedSize();
 							++txnCount;
 						}
+						wait(taskBucket->keepRunning(tr, task));
 						wait(tr->commit());
 						mutationIndex += txnCount; // update mutationIndex after the commit succeeds
 					} catch (Error& e) {
