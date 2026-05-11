@@ -1,6 +1,7 @@
 ---
 Checks: >
   -*,
+  bugprone-redundant-branch-condition,
   bugprone-sizeof-expression,
   bugprone-suspicious-string-compare,
   bugprone-use-after-move,
