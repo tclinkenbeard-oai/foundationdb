@@ -2061,9 +2061,9 @@ void SimulationConfig::setMachineCount(const TestConfig& testConfig) {
 		// is down during failures).
 		machine_count = 16;
 	} else if (generateFearless) {
-		// Triple satellite configurations need the same spare-machine headroom as triple replication: three satellite
-		// tlogs are required, and failure workloads can make one machine temporarily unavailable.
-		machine_count = needsSatelliteTLogHeadroom ? 16 : 12;
+		// Triple satellite configurations need enough spare-machine headroom to keep three satellite tlogs available
+		// while duplicated attrition workloads overlap with other failures.
+		machine_count = needsSatelliteTLogHeadroom ? 24 : 12;
 	} else if (db.tLogPolicy && db.tLogPolicy->info() == "data_hall^2 x zoneid^2 x 1") {
 		machine_count = 9;
 	} else {
