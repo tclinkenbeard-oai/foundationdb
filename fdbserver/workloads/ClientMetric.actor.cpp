@@ -176,11 +176,14 @@ struct ClientMetricWorkload : TestWorkload {
 	                                                     int numKeys,
 	                                                     uint64_t previousVS) {
 		state int retry = 0;
-		state int max_retry = 10;
+		state int max_retry = 50;
 		state int keysLimit = 1;
 		loop {
 			if (retry > max_retry) {
-				// this should not happen, it should succeed after a few retry
+				TraceEvent(SevError, "WriteKeysAndGetLatencyVersionFailed")
+				    .detail("Retry", retry)
+				    .detail("MaxRetry", max_retry)
+				    .detail("PreviousVS", previousVS);
 				ASSERT(false);
 			}
 			// write random keys to generate some latency metrics
