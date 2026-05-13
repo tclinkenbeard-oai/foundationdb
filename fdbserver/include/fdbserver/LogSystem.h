@@ -260,7 +260,6 @@ struct ILogSystem {
 		const LogMessageVersion& version() const override;
 		Version popped() const override;
 		Version getMinKnownCommittedVersion() const override;
-		Version getMaxKnownVersion() const override;
 		Optional<UID> getPrimaryPeekLocation() const override;
 		Optional<UID> getCurrentPeekLocation() const override;
 
@@ -413,6 +412,7 @@ struct ILogSystem {
 		const LogMessageVersion& version() const override;
 		Version popped() const override;
 		Version getMinKnownCommittedVersion() const override;
+		Version getMaxKnownVersion() const override;
 		Optional<UID> getPrimaryPeekLocation() const override;
 		Optional<UID> getCurrentPeekLocation() const override;
 
