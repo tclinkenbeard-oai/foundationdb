@@ -827,6 +827,14 @@ Version ILogSystem::MergedPeekCursor::getMinKnownCommittedVersion() const {
 	return serverCursors[currentCursor]->getMinKnownCommittedVersion();
 }
 
+Version ILogSystem::MergedPeekCursor::getMaxKnownVersion() const {
+	Version maxKnownVersion = 0;
+	for (const auto& cursor : serverCursors) {
+		maxKnownVersion = std::max(maxKnownVersion, cursor->getMaxKnownVersion());
+	}
+	return maxKnownVersion;
+}
+
 Optional<UID> ILogSystem::MergedPeekCursor::getPrimaryPeekLocation() const {
 	if (bestServer >= 0) {
 		return serverCursors[bestServer]->getPrimaryPeekLocation();
@@ -1184,6 +1192,16 @@ Version ILogSystem::SetPeekCursor::getMinKnownCommittedVersion() const {
 	return serverCursors[currentSet][currentCursor]->getMinKnownCommittedVersion();
 }
 
+Version ILogSystem::SetPeekCursor::getMaxKnownVersion() const {
+	Version maxKnownVersion = 0;
+	for (const auto& cursors : serverCursors) {
+		for (const auto& cursor : cursors) {
+			maxKnownVersion = std::max(maxKnownVersion, cursor->getMaxKnownVersion());
+		}
+	}
+	return maxKnownVersion;
+}
+
 Optional<UID> ILogSystem::SetPeekCursor::getPrimaryPeekLocation() const {
 	if (bestServer >= 0 && bestSet >= 0) {
 		return serverCursors[bestSet][bestServer]->getPrimaryPeekLocation();
@@ -1292,6 +1310,14 @@ const LogMessageVersion& ILogSystem::MultiCursor::version() const {
 
 Version ILogSystem::MultiCursor::getMinKnownCommittedVersion() const {
 	return cursors.back()->getMinKnownCommittedVersion();
+}
+
+Version ILogSystem::MultiCursor::getMaxKnownVersion() const {
+	Version maxKnownVersion = 0;
+	for (const auto& cursor : cursors) {
+		maxKnownVersion = std::max(maxKnownVersion, cursor->getMaxKnownVersion());
+	}
+	return maxKnownVersion;
 }
 
 Optional<UID> ILogSystem::MultiCursor::getPrimaryPeekLocation() const {
