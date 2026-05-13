@@ -188,6 +188,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 			Transaction tr(cx);
 			Error err;
 			try {
+				tr.setOption(FDBTransactionOptions::LOCK_AWARE);
 				std::vector<Future<RangeResult>> results;
 				for (auto& range : ranges) {
 					results.push_back(tr.getRange(range.removePrefix(removePrefix), 1000));
@@ -681,7 +682,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 						                                  StopWhenDone::True,
 						                                  StringRef(),
 						                                  backupPrefix,
-						                                  locked,
+						                                  LockDB::True,
 						                                  DatabaseBackupAgent::PreBackupAction::CLEAR);
 					} catch (Error& e) {
 						TraceEvent("BARW_DoBackupSubmitBackupException", randomID)
@@ -701,7 +702,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 					                                  StopWhenDone::True,
 					                                  StringRef(),
 					                                  backupPrefix,
-					                                  locked,
+					                                  LockDB::True,
 					                                  DatabaseBackupAgent::PreBackupAction::CLEAR);
 				} catch (Error& e) {
 					TraceEvent("BARW_DoBackupSubmitBackupException", randomID)
@@ -712,7 +713,6 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 				}
 
 				co_await restoreTool.waitBackup(cx, restoreTag);
-				co_await restoreTool.unlockBackup(cx, restoreTag);
 
 				// Make sure no more data is written to the restored range
 				// after the restore completes.
@@ -729,6 +729,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 						ASSERT(range1[j].key == range2[j].key && range1[j].value == range2[j].value);
 					}
 				}
+				co_await restoreTool.unlockBackup(cx, restoreTag);
 			}
 
 			if (extraBackup.isValid()) {

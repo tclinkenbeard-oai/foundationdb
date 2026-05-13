@@ -329,6 +329,7 @@ public:
 	KeyBackedProperty<bool> onlyApplyMutationLogs() { return configSpace.pack(__FUNCTION__sr); }
 	KeyBackedProperty<bool> inconsistentSnapshotOnly() { return configSpace.pack(__FUNCTION__sr); }
 	KeyBackedProperty<bool> unlockDBAfterRestore() { return configSpace.pack(__FUNCTION__sr); }
+	KeyBackedProperty<UID> databaseLockUID() { return configSpace.pack(__FUNCTION__sr); }
 	KeyBackedProperty<MutationLogType> mutationLogType() { return configSpace.pack(__FUNCTION__sr); }
 	// BulkLoad integration properties
 	KeyBackedProperty<bool> useRangeFileRestore() { return configSpace.pack(__FUNCTION__sr); }
@@ -4753,6 +4754,7 @@ struct RestoreCompleteTaskFunc : RestoreTaskFuncBase {
 		RestoreConfig restore(task);
 		restore.stateEnum().set(tr, ERestoreState::COMPLETED);
 		bool unlockDB = co_await restore.unlockDBAfterRestore().getD(tr, Snapshot::False, true);
+		UID databaseLockUID = co_await restore.databaseLockUID().getD(tr, Snapshot::False, restore.getUid());
 
 		tr->atomicOp(metadataVersionKey, metadataVersionRequiredValue, MutationRef::SetVersionstampedValue);
 		// Clear the file map now since it could be huge.
@@ -4771,7 +4773,7 @@ struct RestoreCompleteTaskFunc : RestoreTaskFuncBase {
 		co_await taskBucket->finish(tr, task);
 
 		if (unlockDB) {
-			co_await unlockDatabase(tr, restore.getUid());
+			co_await unlockDatabase(tr, databaseLockUID);
 		}
 
 		co_return;
@@ -5007,7 +5009,9 @@ struct RestoreRangeTaskFunc : RestoreFileTaskFuncBase {
 					// Add to bytes written count
 					restore.bytesWritten().atomicOp(tr, txBytes, MutationRef::Type::AddValue);
 
-					Future<Void> checkLock = checkDatabaseLock(tr, restore.getUid());
+					UID databaseLockUID =
+					    co_await restore.databaseLockUID().getD(tr, Snapshot::False, restore.getUid());
+					Future<Void> checkLock = checkDatabaseLock(tr, databaseLockUID);
 
 					co_await taskBucket->keepRunning(tr, task);
 
@@ -5371,7 +5375,8 @@ struct RestoreLogDataTaskFunc : RestoreFileTaskFuncBase {
 					txBytes += v.expectedSize();
 				}
 
-				Future<Void> checkLock = checkDatabaseLock(tr, restore.getUid());
+				UID databaseLockUID = co_await restore.databaseLockUID().getD(tr, Snapshot::False, restore.getUid());
+				Future<Void> checkLock = checkDatabaseLock(tr, databaseLockUID);
 
 				co_await taskBucket->keepRunning(tr, task);
 				co_await checkLock;
@@ -6606,7 +6611,11 @@ Future<ERestoreState> abortRestore(Reference<ReadYourWritesTransaction> tr, Key 
 	// Cancel the backup tasks on this tag
 	co_await tag.cancel(tr);
 
-	co_await unlockDatabase(tr, current.get().first);
+	bool unlockDB = co_await restore.unlockDBAfterRestore().getD(tr, Snapshot::False, true);
+	if (unlockDB) {
+		UID databaseLockUID = co_await restore.databaseLockUID().getD(tr, Snapshot::False, current.get().first);
+		co_await unlockDatabase(tr, databaseLockUID);
+	}
 	co_return ERestoreState::ABORTED;
 }
 
@@ -7340,6 +7349,7 @@ public:
 	                                  InconsistentSnapshotOnly inconsistentSnapshotOnly,
 	                                  Version beginVersion,
 	                                  UID uid,
+	                                  Optional<UID> lockUID,
 	                                  MutationLogType mutationLogType,
 	                                  Optional<std::string> encryptionKeyFileName,
 	                                  int encryptionBlockSize,
@@ -7420,6 +7430,7 @@ public:
 		restore.inconsistentSnapshotOnly().set(tr, inconsistentSnapshotOnly);
 		restore.beginVersion().set(tr, beginVersion);
 		restore.unlockDBAfterRestore().set(tr, unlockDB);
+		restore.databaseLockUID().set(tr, lockUID.present() ? lockUID.get() : uid);
 		restore.mutationLogType().set(tr, mutationLogType);
 		restore.useRangeFileRestore().set(tr, useRangeFileRestore);
 		if (BUGGIFY && restoreRanges.size() == 1) {
@@ -7434,10 +7445,11 @@ public:
 		Key taskKey = co_await fileBackup::StartFullRestoreTaskFunc::addTask(
 		    tr, backupAgent->taskBucket, uid, TaskCompletionKey::noSignal());
 
+		UID databaseLockUID = lockUID.present() ? lockUID.get() : uid;
 		if (lockDB)
-			co_await lockDatabase(tr, uid);
+			co_await lockDatabase(tr, databaseLockUID);
 		else
-			co_await checkDatabaseLock(tr, uid);
+			co_await checkDatabaseLock(tr, databaseLockUID);
 
 		co_return;
 	}
@@ -8172,13 +8184,14 @@ public:
 	//   verbose: print verbose information.
 	//   addPrefix: each key is added this prefix during restore.
 	//   removePrefix: for each key to be restored, remove this prefix first.
-	//   lockDB: if set lock the database with randomUid before performing restore;
-	//           otherwise, check database is locked with the randomUid
+	//   lockDB: if set, lock the database with lockUID when present, or restoreUid by default;
+	//           otherwise, check database is locked with lockUID when present, or restoreUid by default
 	//   onlyApplyMutationLogs: only perform incremental restore, by only applying mutation logs
 	//   inconsistentSnapshotOnly: Ignore mutation log files during the restore to speedup the process.
 	//                             When set to true, gives an inconsistent snapshot, thus not recommended
 	//   beginVersions: restore's begin version for each range
-	//   randomUid: the UID for lock the database
+	//   restoreUid: the restore config UID
+	//   lockUID: the database lock UID to use when one is supplied explicitly
 	static Future<Version> restore(FileBackupAgent* backupAgent,
 	                               Database cx,
 	                               Optional<Database> cxOrig,
@@ -8197,7 +8210,8 @@ public:
 	                               OnlyApplyMutationLogs onlyApplyMutationLogs,
 	                               InconsistentSnapshotOnly inconsistentSnapshotOnly,
 	                               Optional<std::string> encryptionKeyFileName,
-	                               UID randomUid,
+	                               UID restoreUid,
+	                               Optional<UID> lockUID,
 	                               bool useRangeFileRestore = true) {
 		// The restore command line tool won't allow ranges to be empty, but correctness workloads somehow might.
 		if (ranges.empty()) {
@@ -8278,7 +8292,8 @@ public:
 				                       onlyApplyMutationLogs,
 				                       inconsistentSnapshotOnly,
 				                       beginVersion,
-				                       randomUid,
+				                       restoreUid,
+				                       lockUID,
 				                       desc.mutationLogType,
 				                       encryptionKeyFileName,
 				                       desc.encryptionBlockSize,
@@ -8444,7 +8459,8 @@ public:
 			                 OnlyApplyMutationLogs::False,
 			                 InconsistentSnapshotOnly::False,
 			                 {},
-			                 randomUid);
+			                 randomUid,
+			                 {});
 			auto rywTransaction = makeReference<ReadYourWritesTransaction>(cx);
 			// clear old restore config associated with system keys
 			while (true) {
@@ -8481,7 +8497,8 @@ public:
 		                               OnlyApplyMutationLogs::False,
 		                               InconsistentSnapshotOnly::False,
 		                               {},
-		                               randomUid);
+		                               randomUid,
+		                               {});
 		co_return ver;
 	}
 };
@@ -8525,7 +8542,8 @@ Future<Version> FileBackupAgent::restore(Database cx,
 	                                    onlyApplyMutationLogs,
 	                                    inconsistentSnapshotOnly,
 	                                    encryptionKeyFileName,
-	                                    lockUID.present() ? lockUID.get() : deterministicRandom()->randomUniqueID(),
+	                                    deterministicRandom()->randomUniqueID(),
+	                                    lockUID,
 	                                    useRangeFileRestore);
 }
 

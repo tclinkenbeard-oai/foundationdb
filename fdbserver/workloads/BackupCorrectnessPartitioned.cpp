@@ -443,10 +443,12 @@ struct BackupAndRestorePartitionedCorrectnessWorkload : TestWorkload {
 	                                              FileBackupAgent* backupAgent,
 	                                              Version targetVersion,
 	                                              Reference<IBackupContainer> lastBackupContainer,
-	                                              Standalone<VectorRef<KeyRangeRef>> systemRestoreRanges) {
+	                                              Standalone<VectorRef<KeyRangeRef>> systemRestoreRanges,
+	                                              UID lockUID) {
 		// restore system keys before restoring any other ranges
 		co_await runRYWTransaction(cx, [=](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
 			tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 			for (auto& range : systemRestoreRanges) {
 				tr->clear(range);
 			}
@@ -465,12 +467,13 @@ struct BackupAndRestorePartitionedCorrectnessWorkload : TestWorkload {
 		                              Verbose::True,
 		                              Key(),
 		                              Key(),
-		                              self->locked,
-		                              UnlockDB::True,
+		                              LockDB::False,
+		                              UnlockDB::False,
 		                              OnlyApplyMutationLogs::False,
 		                              InconsistentSnapshotOnly::False,
 		                              ::invalidVersion,
-		                              self->encryptionKeyFileName);
+		                              self->encryptionKeyFileName,
+		                              lockUID);
 		printf("BackupCorrectness, backupAgent.restore finished for tag:%s\n", restoreTag.toString().c_str());
 	}
 
@@ -553,8 +556,28 @@ struct BackupAndRestorePartitionedCorrectnessWorkload : TestWorkload {
 						                    : desc.maxRestorableVersion.get();
 					}
 				}
+
+				UID lockUID = logUid;
+				while (true) {
+					Error err;
+					try {
+						co_await lockDatabase(cx, lockUID);
+						break;
+					} catch (Error& e) {
+						err = e;
+					}
+					if (err.code() != error_code_database_locked) {
+						throw err;
+					}
+					co_await delay(0.1);
+				}
+				TraceEvent("BARW_DatabaseLocked", randomID)
+				    .detail("LockUID", lockUID)
+				    .detail("BackupTag", printable(backupTag));
+
 				co_await runRYWTransaction(cx, [=](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
 					tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+					tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 					for (auto& kvrange : backupRanges) {
 						// version needs to be decided before this transaction otherwise
 						// this clear mutation might be backup as well
@@ -593,7 +616,7 @@ struct BackupAndRestorePartitionedCorrectnessWorkload : TestWorkload {
 				restoreRanges = modifiedRestoreRanges;
 				if (!systemRestoreRanges.empty()) {
 					co_await clearAndRestoreSystemKeys(
-					    cx, this, &backupAgent, targetVersion, lastBackupContainer, systemRestoreRanges);
+					    cx, this, &backupAgent, targetVersion, lastBackupContainer, systemRestoreRanges, lockUID);
 				}
 
 				Standalone<StringRef> restoreTag(backupTag.toString() + "_" + std::to_string(restoreIndex));
@@ -614,17 +637,19 @@ struct BackupAndRestorePartitionedCorrectnessWorkload : TestWorkload {
 				                                       Verbose::True,
 				                                       Key(),
 				                                       Key(),
-				                                       locked,
-				                                       UnlockDB::True,
+				                                       LockDB::False,
+				                                       UnlockDB::False,
 				                                       OnlyApplyMutationLogs::False,
 				                                       InconsistentSnapshotOnly::False,
 				                                       ::invalidVersion,
-				                                       encryptionKeyFileName));
+				                                       encryptionKeyFileName,
+				                                       lockUID));
 				co_await waitForAll(restores);
 
 				for (auto& restore : restores) {
 					ASSERT(!restore.isError());
 				}
+				co_await unlockDatabase(cx, lockUID);
 			}
 			Key backupAgentKey = uidPrefixKey(logRangesRange.begin, logUid);
 			Key backupLogValuesKey = destUidValue.withPrefix(backupLogKeys.begin);

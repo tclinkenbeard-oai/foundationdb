@@ -448,12 +448,14 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 	                                 FileBackupAgent* backupAgent,
 	                                 Standalone<StringRef> lastBackupContainer,
 	                                 UID randomID,
-	                                 Optional<std::string> encryptionKeyFileName) {
+	                                 Optional<std::string> encryptionKeyFileName,
+	                                 UID lockUID) {
 		Transaction tr(cx);
 		int rowCount = 0;
 		while (true) {
 			Error err;
 			try {
+				tr.setOption(FDBTransactionOptions::LOCK_AWARE);
 				RangeResult existingRows = co_await tr.getRange(normalKeys, 1);
 				rowCount = existingRows.size();
 				break;
@@ -466,22 +468,26 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 		// Try doing a restore without clearing the keys
 		if (rowCount > 0) {
 			try {
+				Standalone<VectorRef<KeyRangeRef>> dirtyRestoreRange;
+				dirtyRestoreRange.push_back_deep(dirtyRestoreRange.arena(), normalKeys);
 				co_await backupAgent->restore(cx,
 				                              cx,
 				                              backupTag,
 				                              KeyRef(lastBackupContainer),
 				                              {},
+				                              dirtyRestoreRange,
 				                              WaitForComplete::True,
 				                              ::invalidVersion,
 				                              Verbose::True,
-				                              normalKeys,
 				                              Key(),
 				                              Key(),
-				                              locked,
+				                              LockDB::False,
+				                              UnlockDB::False,
 				                              OnlyApplyMutationLogs::False,
 				                              InconsistentSnapshotOnly::False,
 				                              ::invalidVersion,
-				                              encryptionKeyFileName);
+				                              encryptionKeyFileName,
+				                              lockUID);
 				TraceEvent(SevError, "BARW_RestoreAllowedOverwrittingDatabase", randomID).log();
 				ASSERT(false);
 			} catch (Error& e) {
@@ -497,10 +503,12 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 	                                              FileBackupAgent* backupAgent,
 	                                              Version targetVersion,
 	                                              Reference<IBackupContainer> lastBackupContainer,
-	                                              Standalone<VectorRef<KeyRangeRef>> systemRestoreRanges) {
+	                                              Standalone<VectorRef<KeyRangeRef>> systemRestoreRanges,
+	                                              UID lockUID) {
 		// restore system keys before restoring any other ranges
 		co_await runRYWTransaction(cx, [=](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
 			tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 			for (auto& range : systemRestoreRanges)
 				tr->clear(range);
 			return Void();
@@ -518,12 +526,13 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 		                              Verbose::True,
 		                              Key(),
 		                              Key(),
-		                              self->locked,
-		                              UnlockDB::True,
+		                              LockDB::False,
+		                              UnlockDB::False,
 		                              OnlyApplyMutationLogs::False,
 		                              InconsistentSnapshotOnly::False,
 		                              ::invalidVersion,
-		                              lastBackupContainer->getEncryptionKeyFileName());
+		                              lastBackupContainer->getEncryptionKeyFileName(),
+		                              lockUID);
 		printf("BackupCorrectness, backupAgent.restore finished for tag:%s\n", restoreTag.toString().c_str());
 	}
 
@@ -631,16 +640,36 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 				                                                 lastBackupContainer->getEncryptionBlockSize());
 				BackupDescription desc = co_await container->describeBackup();
 
+				UID lockUID = logUid;
+				while (true) {
+					Error err;
+					try {
+						co_await lockDatabase(cx, lockUID);
+						break;
+					} catch (Error& e) {
+						err = e;
+					}
+					if (err.code() != error_code_database_locked) {
+						throw err;
+					}
+					co_await delay(0.1);
+				}
+				TraceEvent("BARW_DatabaseLocked", randomID)
+				    .detail("LockUID", lockUID)
+				    .detail("BackupTag", printable(backupTag));
+
 				if (deterministicRandom()->random01() < 0.5) {
 					co_await attemptDirtyRestore(cx,
 					                             &backupAgent,
 					                             StringRef(lastBackupContainer->getURL()),
 					                             randomID,
-					                             lastBackupContainer->getEncryptionKeyFileName());
+					                             lastBackupContainer->getEncryptionKeyFileName(),
+					                             lockUID);
 				}
 
 				co_await runRYWTransaction(cx, [=](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
 					tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+					tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 					for (auto& kvrange : backupRanges)
 						tr->clear(kvrange);
 					return Void();
@@ -695,7 +724,7 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 					// We are able to restore system keys first since we restore an entire cluster at once rather than
 					// partial key ranges.
 					co_await clearAndRestoreSystemKeys(
-					    cx, this, &backupAgent, targetVersion, lastBackupContainer, systemRestoreRanges);
+					    cx, this, &backupAgent, targetVersion, lastBackupContainer, systemRestoreRanges, lockUID);
 				}
 				if (deterministicRandom()->random01() < 0.5) {
 					for (restoreIndex = 0; restoreIndex < restoreRanges.size(); restoreIndex++) {
@@ -707,22 +736,26 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 						       restoreIndex,
 						       range.toString().c_str(),
 						       restoreTag.toString().c_str());
+						Standalone<VectorRef<KeyRangeRef>> restoreRange;
+						restoreRange.push_back_deep(restoreRange.arena(), range);
 						restores.push_back(backupAgent.restore(cx,
 						                                       cx,
 						                                       restoreTag,
 						                                       KeyRef(lastBackupContainer->getURL()),
 						                                       lastBackupContainer->getProxy(),
+						                                       restoreRange,
 						                                       WaitForComplete::True,
 						                                       targetVersion,
 						                                       Verbose::True,
-						                                       range,
 						                                       Key(),
 						                                       Key(),
-						                                       locked,
+						                                       LockDB::False,
+						                                       UnlockDB::False,
 						                                       OnlyApplyMutationLogs::False,
 						                                       InconsistentSnapshotOnly::False,
 						                                       ::invalidVersion,
-						                                       lastBackupContainer->getEncryptionKeyFileName()));
+						                                       lastBackupContainer->getEncryptionKeyFileName(),
+						                                       lockUID));
 					}
 				} else {
 					multipleRangesInOneTag = true;
@@ -742,12 +775,13 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 					                                       Verbose::True,
 					                                       Key(),
 					                                       Key(),
-					                                       locked,
-					                                       UnlockDB::True,
+					                                       LockDB::False,
+					                                       UnlockDB::False,
 					                                       OnlyApplyMutationLogs::False,
 					                                       InconsistentSnapshotOnly::False,
 					                                       ::invalidVersion,
-					                                       lastBackupContainer->getEncryptionKeyFileName()));
+					                                       lastBackupContainer->getEncryptionKeyFileName(),
+					                                       lockUID));
 				}
 
 				// Sometimes kill and restart the restore
@@ -761,6 +795,7 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 							co_await runRYWTransaction(cx,
 							                           [=](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
 								                           tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+								                           tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 								                           for (auto& range : restoreRanges)
 									                           tr->clear(range);
 								                           return Void();
@@ -777,12 +812,13 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 							                        Verbose::True,
 							                        Key(),
 							                        Key(),
-							                        locked,
-							                        UnlockDB::True,
+							                        LockDB::False,
+							                        UnlockDB::False,
 							                        OnlyApplyMutationLogs::False,
 							                        InconsistentSnapshotOnly::False,
 							                        ::invalidVersion,
-							                        lastBackupContainer->getEncryptionKeyFileName());
+							                        lastBackupContainer->getEncryptionKeyFileName(),
+							                        lockUID);
 						}
 					} else {
 						for (restoreIndex = 0; restoreIndex < restores.size(); restoreIndex++) {
@@ -795,26 +831,31 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 								co_await runRYWTransaction(
 								    cx, [=](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
 									    tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+									    tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 									    tr->clear(restoreRanges[restoreIndex]);
 									    return Void();
 								    });
+								Standalone<VectorRef<KeyRangeRef>> restoreRange;
+								restoreRange.push_back_deep(restoreRange.arena(), restoreRanges[restoreIndex]);
 								restores[restoreIndex] =
 								    backupAgent.restore(cx,
 								                        cx,
 								                        restoreTags[restoreIndex],
 								                        KeyRef(lastBackupContainer->getURL()),
 								                        lastBackupContainer->getProxy(),
+								                        restoreRange,
 								                        WaitForComplete::True,
 								                        ::invalidVersion,
 								                        Verbose::True,
-								                        restoreRanges[restoreIndex],
 								                        Key(),
 								                        Key(),
-								                        locked,
+								                        LockDB::False,
+								                        UnlockDB::False,
 								                        OnlyApplyMutationLogs::False,
 								                        InconsistentSnapshotOnly::False,
 								                        ::invalidVersion,
-								                        lastBackupContainer->getEncryptionKeyFileName());
+								                        lastBackupContainer->getEncryptionKeyFileName(),
+								                        lockUID);
 							}
 						}
 					}
@@ -825,6 +866,7 @@ struct BackupAndRestoreCorrectnessWorkload : TestWorkload {
 				for (auto& restore : restores) {
 					ASSERT(!restore.isError());
 				}
+				co_await unlockDatabase(cx, lockUID);
 			}
 
 			if (extraBackup.isValid()) {

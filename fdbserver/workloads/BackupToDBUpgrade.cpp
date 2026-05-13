@@ -468,29 +468,6 @@ struct BackupToDBUpgradeWorkload : TestWorkload {
 			co_await unlockDatabase(extraDB, logUid);
 
 			// restore database
-			TraceEvent("DRU_PrepareRestore").detail("RestoreTag", printable(restoreTag));
-			Reference<ReadYourWritesTransaction> tr2(new ReadYourWritesTransaction(cx));
-			while (true) {
-				Error err;
-				try {
-					tr2->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
-					tr2->setOption(FDBTransactionOptions::LOCK_AWARE);
-					for (auto r : prevBackupRanges) {
-						if (!r.empty()) {
-							std::cout << "r: " << r.begin.printable() << " - " << r.end.printable() << std::endl;
-							tr2->addReadConflictRange(r);
-							tr2->clear(r);
-						}
-					}
-					co_await tr2->commit();
-					break;
-				} catch (Error& e) {
-					err = e;
-				}
-				TraceEvent("DRU_RestoreSetupError").errorUnsuppressed(err);
-				co_await tr2->onError(err);
-			}
-
 			Standalone<VectorRef<KeyRangeRef>> restoreRanges;
 			for (auto r : prevBackupRanges) {
 				restoreRanges.push_back_deep(
@@ -501,8 +478,14 @@ struct BackupToDBUpgradeWorkload : TestWorkload {
 			// start restoring db
 			try {
 				TraceEvent("DRU_RestoreDb").detail("RestoreTag", printable(restoreTag));
-				co_await restoreTool.submitBackup(
-				    cx, restoreTag, restoreRanges, StopWhenDone::True, StringRef(), backupPrefix);
+				co_await restoreTool.submitBackup(cx,
+				                                  restoreTag,
+				                                  restoreRanges,
+				                                  StopWhenDone::True,
+				                                  StringRef(),
+				                                  backupPrefix,
+				                                  LockDB::True,
+				                                  DatabaseBackupAgent::PreBackupAction::CLEAR);
 			} catch (Error& e) {
 				TraceEvent("DRU_RestoreSubmitBackupError").error(e).detail("Tag", printable(restoreTag));
 				if (e.code() != error_code_backup_unneeded && e.code() != error_code_backup_duplicate)
