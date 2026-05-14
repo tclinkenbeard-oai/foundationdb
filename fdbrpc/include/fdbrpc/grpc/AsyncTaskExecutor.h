@@ -118,8 +118,7 @@ private:
 
 // `ThreadAction` implementation for tasks that return non-void values.
 template <typename Func>
-    requires(!IsVoidReturn<Func>)
-struct AsyncTaskExecutor::Action<Func> : ThreadAction {
+struct AsyncTaskExecutor::Action<Func, std::enable_if_t<!IsVoidReturn<Func>>> : ThreadAction {
 	using Ret = typename std::invoke_result<Func>::type;
 
 	Action(Func&& fn) : fn_(std::move(fn)) {}
@@ -156,8 +155,7 @@ private:
 
 // `ThreadAction` implementation for tasks that return void.
 template <typename Func>
-    requires(IsVoidReturn<Func>)
-struct AsyncTaskExecutor::Action<Func> : ThreadAction {
+struct AsyncTaskExecutor::Action<Func, std::enable_if_t<IsVoidReturn<Func>>> : ThreadAction {
 	using Ret = typename std::invoke_result<Func>::type;
 
 	Action(Func&& fn) : fn_(std::move(fn)) {}
