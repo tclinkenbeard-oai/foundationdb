@@ -180,11 +180,17 @@ struct GcGenerationsWorkload : TestWorkload {
 
 			// Only reboot the master if it's in the primary DC. If it's in the clogged
 			// remote DC, recovery will stall because the master can't communicate with
-			// primary DC processes. Loop back and try again.
+			// primary DC processes. Force a new master election before retrying instead
+			// of spinning on the same unreachable remote master forever.
 			if (self->isMasterInRemoteDc(self)) {
+				auto masterAddr = self->dbInfo->get().master.address();
+				auto* masterProc = g_simulator->getProcessByAddress(masterAddr);
 				TraceEvent("RetryingRemoteDcMaster")
 				    .detail("Iteration", successfulReboots)
-				    .detail("MasterAddr", self->dbInfo->get().master.address());
+				    .detail("MasterAddr", masterAddr);
+				if (masterProc) {
+					g_simulator->rebootProcess(masterProc, ISimulator::KillType::Reboot);
+				}
 				continue;
 			}
 
