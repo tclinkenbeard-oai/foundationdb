@@ -69,30 +69,43 @@ public:
 			}
 		}
 
-		if (server->metrics.get().lastUpdate < now() - SERVER_KNOBS->DD_SS_STUCK_TIME_LIMIT) {
-			if (server->ssVersionTooFarBehind.get() == false) {
-				TraceEvent("StorageServerStuck", server->collection->getDistributorId())
-				    .detail("ServerId", server->id.toString())
-				    .detail("LastUpdate", server->metrics.get().lastUpdate);
-				server->ssVersionTooFarBehind.set(true);
-				server->collection->addLaggingStorageServer(server->lastKnownInterface.locality.zoneId().get());
-			}
-		} else if (server->metrics.get().versionLag > SERVER_KNOBS->DD_SS_FAILURE_VERSIONLAG) {
-			if (server->ssVersionTooFarBehind.get() == false) {
+		const bool noRecentUpdates =
+		    server->metrics.get().lastUpdate < now() - SERVER_KNOBS->DD_SS_STUCK_TIME_LIMIT;
+		const bool versionLagTooFarBehind =
+		    server->metrics.get().versionLag > SERVER_KNOBS->DD_SS_FAILURE_VERSIONLAG;
+		const bool versionLagRecovered =
+		    server->metrics.get().versionLag < SERVER_KNOBS->DD_SS_ALLOWED_VERSIONLAG;
+		const bool wasNoRecentUpdates = server->ssNoRecentUpdates.get();
+		const bool wasLagging = server->ssVersionTooFarBehind.get();
+
+		if (noRecentUpdates && !wasNoRecentUpdates) {
+			TraceEvent("StorageServerStuck", server->collection->getDistributorId())
+			    .detail("ServerId", server->id.toString())
+			    .detail("LastUpdate", server->metrics.get().lastUpdate);
+		}
+		server->ssNoRecentUpdates.set(noRecentUpdates);
+
+		bool isLagging = wasLagging;
+		if (noRecentUpdates || versionLagTooFarBehind) {
+			isLagging = true;
+		} else if (versionLagRecovered) {
+			isLagging = false;
+		}
+
+		if (isLagging && !wasLagging) {
+			if (!noRecentUpdates) {
 				TraceEvent(SevWarn, "SSVersionDiffLarge", server->collection->getDistributorId())
 				    .detail("ServerId", server->id.toString())
 				    .detail("VersionLag", server->metrics.get().versionLag);
-				server->ssVersionTooFarBehind.set(true);
-				server->collection->addLaggingStorageServer(server->lastKnownInterface.locality.zoneId().get());
 			}
-		} else if (server->metrics.get().versionLag < SERVER_KNOBS->DD_SS_ALLOWED_VERSIONLAG) {
-			if (server->ssVersionTooFarBehind.get() == true) {
-				TraceEvent("SSVersionDiffNormal", server->collection->getDistributorId())
-				    .detail("ServerId", server->id.toString())
-				    .detail("VersionLag", server->metrics.get().versionLag);
-				server->ssVersionTooFarBehind.set(false);
-				server->collection->removeLaggingStorageServer(server->lastKnownInterface.locality.zoneId().get());
-			}
+			server->ssVersionTooFarBehind.set(true);
+			server->collection->addLaggingStorageServer(server->lastKnownInterface.locality.zoneId().get());
+		} else if (!isLagging && wasLagging) {
+			TraceEvent("SSVersionDiffNormal", server->collection->getDistributorId())
+			    .detail("ServerId", server->id.toString())
+			    .detail("VersionLag", server->metrics.get().versionLag);
+			server->ssVersionTooFarBehind.set(false);
+			server->collection->removeLaggingStorageServer(server->lastKnownInterface.locality.zoneId().get());
 		}
 
 		// Detect any storage server with a too long storage queue and notify team tracker

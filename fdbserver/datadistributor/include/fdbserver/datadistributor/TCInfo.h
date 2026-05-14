@@ -78,6 +78,7 @@ public:
 	Promise<Void> updated;
 	AsyncVar<bool> wrongStoreTypeToRemove;
 	AsyncVar<bool> ssVersionTooFarBehind;
+	AsyncVar<bool> ssNoRecentUpdates;
 	AsyncVar<int64_t> longStorageQueue; // set when the storage queue remains too long for a while
 
 	TCServerInfo(StorageServerInterface ssi,

@@ -1380,13 +1380,15 @@ public:
 		try {
 			loop {
 				{
+					bool noRecentUpdatesUndesired = server->ssNoRecentUpdates.get();
 					bool versionLagUndesired =
-					    !self->disableFailingLaggingServers.get() && server->ssVersionTooFarBehind.get();
+					    noRecentUpdatesUndesired ||
+					    (!self->disableFailingLaggingServers.get() && server->ssVersionTooFarBehind.get());
 					if (versionLagUndesired && !status.isUndesired) {
 						TraceEvent(SevWarn, "UndesiredStorageServer", self->distributorId)
 						    .detail("Server", server->getId())
 						    .detail("Address", server->getLastKnownInterface().address())
-						    .detail("Reason", "VersionLag");
+						    .detail("Reason", noRecentUpdatesUndesired ? "NoRecentUpdates" : "VersionLag");
 					}
 					status.isUndesired = versionLagUndesired;
 				}
@@ -1742,6 +1744,7 @@ public:
 					}
 					when(wait(storageMetadataTracker)) {}
 					when(wait(server->ssVersionTooFarBehind.onChange())) {}
+					when(wait(server->ssNoRecentUpdates.onChange())) {}
 					when(wait(self->disableFailingLaggingServers.onChange())) {}
 					when(wait(server->longStorageQueue.onChange())) {
 						int64_t threshold = calculateTeamStorageQueueThreshold(self->teams);
