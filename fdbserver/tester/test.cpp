@@ -670,10 +670,10 @@ Future<Void> runTests7(Reference<AsyncVar<Optional<struct ClusterControllerFullI
 
 		Error quietDbErr;
 		try {
-			co_await (quietDatabase(cx, dbInfo, "Start") ||
-			          (databasePingDelay == 0.0
-			               ? Never()
-			               : testDatabaseLiveness(cx, databasePingDelay, "QuietDatabaseStart", startDelay)));
+			Future<Void> livenessCheck = databasePingDelay == 0.0
+			    ? Never()
+			    : testDatabaseLiveness(cx, databasePingDelay, "QuietDatabaseStart", startDelay);
+			co_await (quietDatabase(cx, dbInfo, "Start") || livenessCheck);
 		} catch (Error& e) {
 			TraceEvent("QuietDatabaseStartExternalError").error(e);
 			throw;
