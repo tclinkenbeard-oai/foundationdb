@@ -77,7 +77,7 @@ struct DiskFailureInjectionWorkload : FailureInjectionWorkload {
 	// 2. Starting the actor that injects failures on chosen storage servers
 	Future<Void> start(Database const& cx) override {
 		if (enabled) {
-			auto result = diskFailureInjectionClient<WorkerInterface>(cx);
+			auto result = diskFailureInjectionClient(cx);
 			//  In verification mode, we want to wait until periodicEventBroadcast actor returns which indicates that
 			//  a non-zero chaosMetric was found.
 			if (verificationMode) {
@@ -140,17 +140,16 @@ struct DiskFailureInjectionWorkload : FailureInjectionWorkload {
 	// Choose random storage servers to inject disk failures.
 	// We currently only inject disk failure on storage servers. Can be expanded to include
 	// other worker types in future
-	template <class W>
 	Future<Void> diskFailureInjectionClient(Database cx) {
 		co_await ::delay(startDelay);
 		double lastTime = now();
-		std::vector<W> machines;
+		std::vector<WorkerInterface> machines;
 		int throttledWorkers = 0;
 		int corruptedWorkers = 0;
 		while (true) {
 			co_await poisson(&lastTime, 1);
 			try {
-				std::pair<std::vector<W>, int> m = co_await getStorageWorkers(cx, dbInfo, false);
+				std::pair<std::vector<WorkerInterface>, int> m = co_await getStorageWorkers(cx, dbInfo, false);
 				if (m.second > 0) {
 					throw operation_failed();
 				}
