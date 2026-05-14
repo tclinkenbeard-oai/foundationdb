@@ -1616,12 +1616,10 @@ Future<Void> clusterRecoveryCore(Reference<ClusterRecoveryData> self) {
 		Future<Void> reg = oldLogSystem ? updateRegistration(self, oldLogSystem) : Never();
 		self->registrationTrigger.trigger();
 
-		auto res = co_await race(
+		Future<Void> recovery =
 		    oldLogSystem ? recoverFrom(self, oldLogSystem, &seedServers, &initialConfChanges, poppedTxsVersion)
-		                 : Never(),
-		    oldLogSystems->onChange(),
-		    reg,
-		    recoverAndEndEpoch);
+		                 : Never();
+		auto res = co_await race(recovery, oldLogSystems->onChange(), reg, recoverAndEndEpoch);
 		if (res.index() == 0) {
 			reg.cancel();
 			break;
