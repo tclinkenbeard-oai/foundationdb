@@ -190,15 +190,19 @@ struct SkewedReadWriteWorkload : ReadWriteCommon {
 		co_await waitForAll(readers);
 	}
 
+	Future<Void> randomReadWriteClientRYW(Database cx,
+	                                      SkewedReadWriteWorkload* self,
+	                                      double delay,
+	                                      int clientIndex);
+
 	void startReadWriteClients(Database cx, std::vector<Future<Void>>& clients) {
 		clientBegin = now();
 		for (int c = 0; c < actorCount; c++) {
 			Future<Void> worker;
 			if (useRYW)
-				worker =
-				    randomReadWriteClient<ReadYourWritesTransaction>(cx, this, actorCount / transactionsPerSecond, c);
+				worker = randomReadWriteClientRYW(cx, this, actorCount / transactionsPerSecond, c);
 			else
-				worker = randomReadWriteClient<Transaction>(cx, this, actorCount / transactionsPerSecond, c);
+				worker = randomReadWriteClientTransaction(cx, this, actorCount / transactionsPerSecond, c);
 			clients.push_back(worker);
 		}
 	}
@@ -256,8 +260,10 @@ struct SkewedReadWriteWorkload : ReadWriteCommon {
 		return deterministicRandom()->randomInt64(0, nodeCount);
 	}
 
-	template <class Trans>
-	Future<Void> randomReadWriteClient(Database cx, SkewedReadWriteWorkload* self, double delay, int clientIndex) {
+	Future<Void> randomReadWriteClientTransaction(Database cx,
+	                                              SkewedReadWriteWorkload* self,
+	                                              double delay,
+	                                              int clientIndex) {
 		double lastTime = now();
 		double GRVStartTime{ 0 };
 		UID debugID;
@@ -280,7 +286,7 @@ struct SkewedReadWriteWorkload : ReadWriteCommon {
 			for (int op = 0; op < writes; op++)
 				values.push_back(self->randomValue());
 
-			Trans tr(cx);
+			Transaction tr(cx);
 
 			if (tstart - self->clientBegin > self->debugTime &&
 			    tstart - self->clientBegin <= self->debugTime + self->debugInterval) {
@@ -346,7 +352,7 @@ struct SkewedReadWriteWorkload : ReadWriteCommon {
 			if (debugID != UID())
 				g_traceBatch.addEvent("TransactionDebug", debugID.first(), "ReadWrite.randomReadWriteClient.After");
 
-			tr = Trans();
+			tr = Transaction();
 
 			double transactionLatency = now() - tstart;
 			self->transactionSuccessMetric->totalLatency = transactionLatency * 1e9;
@@ -363,6 +369,116 @@ struct SkewedReadWriteWorkload : ReadWriteCommon {
 		}
 	}
 };
+
+Future<Void> SkewedReadWriteWorkload::randomReadWriteClientRYW(
+    Database cx,
+    SkewedReadWriteWorkload* self,
+    double delay,
+    int clientIndex) {
+	double lastTime = now();
+	double GRVStartTime{ 0 };
+	UID debugID;
+
+	while (true) {
+		co_await poisson(&lastTime, delay);
+
+		double tstart = now();
+		bool aTransaction = deterministicRandom()->random01() > self->alpha;
+
+		std::vector<int64_t> keys;
+		std::vector<Value> values;
+		std::vector<KeyRange> extra_ranges;
+		int reads = aTransaction ? self->readsPerTransactionA : self->readsPerTransactionB;
+		int writes = aTransaction ? self->writesPerTransactionA : self->writesPerTransactionB;
+		for (int op = 0; op < reads; op++)
+			keys.push_back(self->getRandomKey(self->nodeCount));
+
+		values.reserve(writes);
+		for (int op = 0; op < writes; op++)
+			values.push_back(self->randomValue());
+
+		ReadYourWritesTransaction tr(cx);
+
+		if (tstart - self->clientBegin > self->debugTime &&
+		    tstart - self->clientBegin <= self->debugTime + self->debugInterval) {
+			debugID = deterministicRandom()->randomUniqueID();
+			tr.debugTransaction(debugID);
+			g_traceBatch.addEvent("TransactionDebug", debugID.first(), "ReadWrite.randomReadWriteClient.Before");
+		} else {
+			debugID = UID();
+		}
+
+		self->transactionSuccessMetric->retries = 0;
+		self->transactionSuccessMetric->commitLatency = -1;
+
+		while (true) {
+			Error err;
+			try {
+				GRVStartTime = now();
+				self->transactionFailureMetric->startLatency = -1;
+
+				double grvLatency = now() - GRVStartTime;
+				self->transactionSuccessMetric->startLatency = grvLatency * 1e9;
+				self->transactionFailureMetric->startLatency = grvLatency * 1e9;
+				if (self->shouldRecord())
+					self->GRVLatencies.addSample(grvLatency);
+
+				double readStart = now();
+				co_await self->readOp(&tr, keys, self, self->shouldRecord());
+
+				double readLatency = now() - readStart;
+				if (self->shouldRecord())
+					self->fullReadLatencies.addSample(readLatency);
+
+				if (!writes)
+					break;
+
+				for (int op = 0; op < writes; op++)
+					tr.set(self->keyForIndex(self->getRandomKey(self->nodeCount, false), false), values[op]);
+
+				double commitStart = now();
+				co_await tr.commit();
+
+				double commitLatency = now() - commitStart;
+				self->transactionSuccessMetric->commitLatency = commitLatency * 1e9;
+				if (self->shouldRecord())
+					self->commitLatencies.addSample(commitLatency);
+
+				break;
+			} catch (Error& e) {
+				err = e;
+			}
+			self->transactionFailureMetric->errorCode = err.code();
+			self->transactionFailureMetric->log();
+
+			co_await tr.onError(err);
+
+			++self->transactionSuccessMetric->retries;
+			++self->totalRetriesMetric;
+
+			if (self->shouldRecord())
+				++self->retries;
+		}
+
+		if (debugID != UID())
+			g_traceBatch.addEvent("TransactionDebug", debugID.first(), "ReadWrite.randomReadWriteClient.After");
+
+		tr = ReadYourWritesTransaction();
+
+		double transactionLatency = now() - tstart;
+		self->transactionSuccessMetric->totalLatency = transactionLatency * 1e9;
+		self->transactionSuccessMetric->log();
+
+		if (self->shouldRecord()) {
+			if (aTransaction)
+				++self->aTransactions;
+			else
+				++self->bTransactions;
+
+			self->latencies.addSample(transactionLatency);
+		}
+	}
+}
 
 WorkloadFactory<SkewedReadWriteWorkload> SkewedReadWriteWorkloadFactory;
 
