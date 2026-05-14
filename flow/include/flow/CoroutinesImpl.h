@@ -939,6 +939,11 @@ struct CoroPromiseBase : CoroReturn<T, Derived, ReturnsExplicitVoid> {
 		return coro::AwaitableFuture<promise_type, U, false, ReturnsExplicitVoid>{ future, self() };
 	}
 
+	template <class U, bool IsStream>
+	auto await_transform(coro::AwaitableFuture<promise_type, U, IsStream, ReturnsExplicitVoid>&& future) {
+		return std::move(future);
+	}
+
 	template <class U>
 	auto await_transform(coro::FutureIgnore<U> future) {
 		// Custom adapters compose through await_transform rather than wrapper
