@@ -340,8 +340,8 @@ Future<Void> endStreamOnDisconnect(Uncancellable,
 	stream.setRequestStreamEndpoint(endpoint);
 	Error err;
 	try {
-		auto res = co_await race(
-		    signal, peer.isValid() ? peer->disconnect.getFuture() : Never(), stream.getErrorFutureAndDelPromiseRef());
+		Future<Void> disconnect = peer.isValid() ? peer->disconnect.getFuture() : Never();
+		auto res = co_await race(signal, disconnect, stream.getErrorFutureAndDelPromiseRef());
 		if (res.index() == 0) {
 			stream.sendError(connection_failed());
 		} else if (res.index() == 1) {
