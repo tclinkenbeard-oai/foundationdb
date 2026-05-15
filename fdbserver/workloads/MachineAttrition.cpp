@@ -31,6 +31,8 @@
 #include "flow/DeterministicRandom.h"
 #include "fdbrpc/SimulatorProcessInfo.h"
 
+#include <algorithm>
+
 static std::set<int> const& normalAttritionErrors() {
 	static std::set<int> s;
 	if (s.empty()) {
@@ -105,7 +107,11 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		suspendDuration = getOption(options, "suspendDuration"_sr, suspendDuration);
 		liveDuration = getOption(options, "liveDuration"_sr, liveDuration);
 		reboot = getOption(options, "reboot"_sr, reboot);
-		killDc = getOption(options, "killDc"_sr, g_network->isSimulated() && deterministicRandom()->random01() < 0.25);
+		bool machineCountSpecified =
+		    hasOption(options, "machinesToKill"_sr) || hasOption(options, "machinesToLeave"_sr);
+		bool randomKillDc = g_network->isSimulated() && deterministicRandom()->random01() < 0.25;
+		bool defaultKillDc = !machineCountSpecified && randomKillDc;
+		killDc = getOption(options, "killDc"_sr, defaultKillDc);
 		killMachine = getOption(options, "killMachine"_sr, killMachine);
 		killDatahall = getOption(options, "killDatahall"_sr, killDatahall);
 		killProcess = getOption(options, "killProcess"_sr, killProcess);
@@ -168,6 +174,58 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		return machines;
 	}
 
+	bool isRegionDatacenter(LocalityData const& machine) const {
+		auto const& policy = fdbSimulationPolicyState();
+		if (!policy.primaryDcId.present()) {
+			return true;
+		}
+		if (machine.dcId() == policy.primaryDcId) {
+			return true;
+		}
+		return policy.usableRegions > 1 && policy.remoteDcId.present() && machine.dcId() == policy.remoteDcId;
+	}
+
+	LocalityData const& selectDatacenterTarget() const {
+		auto regionDc = std::find_if(machines.rbegin(), machines.rend(), [this](LocalityData const& machine) {
+			return isRegionDatacenter(machine);
+		});
+		return regionDc == machines.rend() ? machines.back() : *regionDc;
+	}
+
+	static std::set<Optional<Standalone<StringRef>>>& targetedMachineZones() {
+		static std::set<Optional<Standalone<StringRef>>> zones;
+		return zones;
+	}
+
+	static std::map<std::pair<int, int>, std::set<Optional<Standalone<StringRef>>>>& targetedMachineZonesByBudget() {
+		static std::map<std::pair<int, int>, std::set<Optional<Standalone<StringRef>>>> zones;
+		return zones;
+	}
+
+	std::set<Optional<Standalone<StringRef>>>& budgetedTargetMachineZones() const {
+		return targetedMachineZonesByBudget()[{ machinesToKill, machinesToLeave }];
+	}
+
+	int budgetedTargetMachineCount() const {
+		// Count the globally claimed zones for this budget directly. Each workload keeps its own shrinking copy of
+		// `machines`, and previously claimed targets are intentionally popped from those local vectors while duplicate
+		// attrition workloads race. Counting through the local vector makes the shared budget appear to shrink again
+		// after another workload has already claimed a zone, allowing duplicate injectors to collectively exceed the
+		// requested machine kill budget.
+		return budgetedTargetMachineZones().size();
+	}
+
+	int availableMachineCount() const {
+		return std::count_if(machines.begin(), machines.end(), [](LocalityData const& machine) {
+			return !targetedMachineZones().count(machine.zoneId());
+		});
+	}
+
+	bool canTargetMachine(LocalityData const& machine) const {
+		return !targetedMachineZones().count(machine.zoneId()) &&
+		       budgetedTargetMachineCount() < machinesToKill;
+	}
+
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override {
 		if (enabled) {
@@ -181,6 +239,12 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 				machines.push_back(it->second);
 			}
 			deterministicRandom()->randomShuffle(machines);
+			// Prefer actual region datacenters over satellite datacenters for machine-scoped attrition as well.
+			// We pop from the back while selecting targets, so keep randomized region machines at the back of the
+			// vector and only consume satellite machines once the regions no longer provide eligible targets.
+			std::stable_partition(machines.begin(), machines.end(), [this](LocalityData const& machine) {
+				return !isRegionDatacenter(machine);
+			});
 			double meanDelay = testDuration / machinesToKill;
 			TraceEvent("AttritionStarting")
 			    .detail("KillDataCenters", killDc)
@@ -336,9 +400,11 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 				delayBeforeKill = deterministicRandom()->random01() * meanDelay;
 				co_await delay(delayBeforeKill);
 
-				// decide on a machine to kill
+				// Prefer actual region datacenters over satellite datacenters. Randomly rebooting the only satellite in a
+				// one-satellite fearless layout can leave the cluster in a long-lived degraded state without exercising
+				// the region-failover behavior this mode is intended to cover.
 				ASSERT(!machines.empty());
-				Optional<Standalone<StringRef>> target = machines.back().dcId();
+				Optional<Standalone<StringRef>> target = selectDatacenterTarget().dcId();
 
 				ISimulator::KillType kt = ISimulator::KillType::Reboot;
 				if (!reboot) {
@@ -380,7 +446,14 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 				g_simulator->toggleGlobalSwitchCluster();
 			} else {
 				int killedMachines = 0;
-				while (killedMachines < machinesToKill && machines.size() > machinesToLeave) {
+				while (killedMachines < machinesToKill) {
+					while (!machines.empty() && !canTargetMachine(machines.back())) {
+						machines.pop_back();
+					}
+					if (availableMachineCount() <= machinesToLeave) {
+						break;
+					}
+
 					TraceEvent("WorkerKillBegin")
 					    .detail("KilledMachines", killedMachines)
 					    .detail("MachinesToKill", machinesToKill)
@@ -408,8 +481,21 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 						}
 					}
 
+					// Another attrition workload may have claimed machines while this workload was waiting.
+					// Re-evaluate the shared target set immediately before selecting a target so duplicate
+					// machine-scoped attrition workloads collectively honor machinesToLeave, even when rebooted
+					// machines later become live again.
+					while (!machines.empty() && !canTargetMachine(machines.back())) {
+						machines.pop_back();
+					}
+					if (availableMachineCount() <= machinesToLeave) {
+						break;
+					}
+
 					// decide on a machine to kill
 					LocalityData targetMachine = machines.back();
+					targetedMachineZones().insert(targetMachine.zoneId());
+					budgetedTargetMachineZones().insert(targetMachine.zoneId());
 					if (BUGGIFY_WITH_PROB(0.01)) {
 						CODE_PROBE(true, "Marked a zone for maintenance before killing it");
 						co_await setHealthyZone(

@@ -1488,6 +1488,7 @@ struct SimulationConfig : public BasicSimulationConfig {
 	FDBExtraDatabaseMode extraDatabaseMode;
 	int extraDatabaseCount;
 	bool generateFearless;
+	bool needsSatelliteTLogHeadroom = false;
 
 	void set_config(std::string config);
 
@@ -1907,6 +1908,7 @@ void SimulationConfig::setRegions(const TestConfig& testConfig) {
 				CODE_PROBE(true, "Simulated cluster using triple satellite redundancy mode");
 				primaryObj["satellite_redundancy_mode"] = "one_satellite_triple";
 				remoteObj["satellite_redundancy_mode"] = "one_satellite_triple";
+				needsSatelliteTLogHeadroom = true;
 				break;
 			}
 			default:
@@ -2064,7 +2066,9 @@ void SimulationConfig::setMachineCount(const TestConfig& testConfig) {
 		// is down during failures).
 		machine_count = 16;
 	} else if (generateFearless) {
-		machine_count = 12;
+		// Triple satellite configurations need enough spare-machine headroom to keep three satellite tlogs available
+		// while duplicated attrition workloads overlap with other failures.
+		machine_count = needsSatelliteTLogHeadroom ? 24 : 12;
 	} else if (db.tLogPolicy && db.tLogPolicy->info() == "data_hall^2 x zoneid^2 x 1") {
 		machine_count = 9;
 	} else {
