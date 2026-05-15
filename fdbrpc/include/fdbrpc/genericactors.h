@@ -371,7 +371,8 @@ Future<ErrorOr<X>> waitValueOrSignal(Future<X> value,
 	PeerHolder holder = PeerHolder(peer);
 	while (true) {
 		try {
-			auto res = co_await race(value, signal, peer.isValid() ? peer->disconnect.getFuture() : Never());
+			Future<Void> disconnect = peer.isValid() ? peer->disconnect.getFuture() : Never();
+			auto res = co_await race(value, signal, disconnect);
 			if (res.index() == 0) {
 				X x = std::get<0>(std::move(res));
 
