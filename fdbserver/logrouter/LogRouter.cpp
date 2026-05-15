@@ -371,8 +371,12 @@ Future<Reference<IPeekCursor>> LogRouterData::getPeekCursorData(Reference<IPeekC
 
 	while (true) {
 		Future<Void> getMoreF = Never();
+		Future<Void> startVersionPopped = Never();
 		if (result) {
 			getMoreF = result->getMore(TaskPriority::TLogCommit);
+			if (version.get() < startVersion) {
+				startVersionPopped = minPopped.whenAtLeast(startVersion);
+			}
 			++getMoreCount;
 			if (!getMoreF.isReady()) {
 				++getMoreBlockedCount;
@@ -389,6 +393,7 @@ Future<Reference<IPeekCursor>> LogRouterData::getPeekCursorData(Reference<IPeekC
 			          maxGetMoreTime = std::max(maxGetMoreTime, peekTime);
 			          shouldExit = true;
 		          })
+		    .When(startVersionPopped, [&](const Void&) { shouldExit = true; })
 		    .When(logSystemChanged,
 		          [&](const Void&) {
 			          if (logSystem->get()) {
@@ -445,6 +450,13 @@ Future<Void> LogRouterData::pullAsyncData() {
 
 	while (true) {
 		r = co_await getPeekCursorData(r, tagAt);
+
+		// If remote consumers have already popped through this router's start version, the router
+		// no longer needs another peek result before acknowledging the handoff boundary.
+		if (version.get() < startVersion && minPopped.get() >= startVersion) {
+			version.set(startVersion);
+			tagAt = std::max(tagAt, version.get() + 1);
+		}
 
 		minKnownCommittedVersion = std::max(minKnownCommittedVersion, r->getMinKnownCommittedVersion());
 
