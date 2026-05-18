@@ -872,6 +872,11 @@ ACTOR static Future<JsonBuilderObject> processStatusFetcher(
 				roles.addRole("router", it.interf());
 			}
 		}
+		for (auto& backupWorker : tLogSet.backupWorkers) {
+			if (backupWorker.present()) {
+				roles.addRole("backup", backupWorker.interf());
+			}
+		}
 	}
 
 	state std::vector<OldTLogConf>::const_iterator oldTLogIter;
@@ -886,6 +891,11 @@ ACTOR static Future<JsonBuilderObject> processStatusFetcher(
 			for (auto& it : tLogSet.logRouters) {
 				if (it.present()) {
 					roles.addRole("router", it.interf());
+				}
+			}
+			for (auto& backupWorker : tLogSet.backupWorkers) {
+				if (backupWorker.present()) {
+					roles.addRole("backup", backupWorker.interf());
 				}
 			}
 		}
