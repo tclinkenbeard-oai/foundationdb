@@ -875,10 +875,14 @@ public:
 					// generate a dataDistributionRelocator directly in DataDistributionQueue to track it, but it's
 					// easier to just (with low priority) schedule it for movement.
 					DataMovementReason reason = DataMovementReason::RECOVER_MOVE;
-					if (unhealthy) {
-						reason = DataMovementReason::TEAM_UNHEALTHY;
-					} else if (r > 0) {
+					// When resumeFromShards materializes extra custom-range boundaries from an
+					// existing shard, those child ranges must first flow through SPLIT_SHARD so
+					// keyServers learns about the physical split. Classifying the same range as
+					// TEAM_UNHEALTHY instead preserves the split only in DD's in-memory model.
+					if (r > 0) {
 						reason = DataMovementReason::SPLIT_SHARD;
+					} else if (unhealthy) {
+						reason = DataMovementReason::TEAM_UNHEALTHY;
 					}
 					self->relocationProducer.send(RelocateShard(keys, reason, RelocateReason::OTHER));
 				}
