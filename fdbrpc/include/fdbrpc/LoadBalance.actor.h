@@ -396,9 +396,24 @@ Future<Void> replicaComparison(Req req,
 			} else if (((numError || numFetchReplicaTimeout) && (requiredReplicas == ALL_REPLICAS)) ||
 			           (successfulReplies != requiredReplicas && requiredReplicas > 0 &&
 			            restOfTeamFutures.size() >= requiredReplicas)) {
+				if (requiredReplicas != ALL_REPLICAS && replicaErrorCode == error_code_process_behind &&
+				    numError > 0 && successfulReplies < requiredReplicas) {
+					// Replica comparisons are an additional consistency signal for non-ALL_REPLICAS reads.
+					// A lagging comparison replica is effectively unavailable at this version, just like a
+					// replica that was already filtered out by the failure monitor above. Do not let that
+					// optional check starve the successful source read indefinitely.
+					TraceEvent(SevWarn, "ReplicaComparisonProcessBehind")
+					    .suppressFor(10.0)
+					    .detail("TeamSize", restOfTeamFutures.size() + 1)
+					    .detail("RequiredReplies", requiredReplicas)
+					    .detail("SuccessfulReplies", successfulReplies)
+					    .detail("SSError", replicaErrorCode);
+					return Void();
+				}
+
 				const char* type = numError ? "ReplicaComparisonReadError" : "ReplicaComparisonTimeoutError";
 				TraceEvent(SevWarnAlways, type)
-				    .suppressFor(1.0)
+				    .suppressFor(10.0)
 				    .detail("TeamSize", restOfTeamFutures.size() + 1)
 				    .detail("RequiredReplies", requiredReplicas)
 				    .detail("SuccessfulReplies", successfulReplies)
