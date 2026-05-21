@@ -140,6 +140,7 @@ const KeyRef JSONSchemas::statusSchema = R"statusSchema(
                         "consistency_scan",
                         "storage_cache",
                         "router",
+                        "backupworker",
                         "coordinator"
                      ]
                   },

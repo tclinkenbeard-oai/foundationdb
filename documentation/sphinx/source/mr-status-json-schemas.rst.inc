@@ -154,6 +154,7 @@
                         "ratekeeper",
                         "storage_cache",
                         "router",
+                        "backupworker",
                         "coordinator"
                      ]
                   },
