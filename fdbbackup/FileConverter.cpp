@@ -561,6 +561,8 @@ int parseCommandLine(ConvertParams* param, CSimpleOpt* args) {
 			printBuildInformation();
 			return FDB_EXIT_ERROR;
 			break;
+		default:
+			break;
 		}
 	}
 	return FDB_EXIT_SUCCESS;

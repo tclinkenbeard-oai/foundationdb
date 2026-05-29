@@ -260,6 +260,8 @@ static int parseCommandLine(Reference<Params> param, CSimpleOpt* args) {
 		case OPT_PROXY:
 			param->proxy = args->OptionArg();
 			break;
+		default:
+			break;
 		}
 	}
 	if (args->FileCount() < 1) {

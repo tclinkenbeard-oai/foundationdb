@@ -1747,6 +1747,8 @@ private:
 				}
 				break;
 			}
+			default:
+				break;
 			}
 		}
 

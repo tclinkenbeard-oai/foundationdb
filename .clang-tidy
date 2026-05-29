@@ -1,6 +1,7 @@
 ---
 Checks: >
   -*,
+  bugprone-dangling-handle,
   bugprone-shared-ptr-array-mismatch,
   bugprone-sizeof-expression,
   bugprone-string-constructor,
@@ -8,8 +9,11 @@ Checks: >
   bugprone-suspicious-memset-usage,
   bugprone-suspicious-semicolon,
   bugprone-suspicious-string-compare,
+  bugprone-switch-missing-default-case,
   bugprone-unique-ptr-array-mismatch,
   bugprone-use-after-move,
+  misc-coroutine-hostile-raii,
+  misc-redundant-expression,
   modernize-use-auto,
   modernize-use-equals-default,
   modernize-use-override,

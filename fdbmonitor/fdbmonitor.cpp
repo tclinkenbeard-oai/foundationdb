@@ -105,6 +105,8 @@ int main(int argc, char** argv) {
 			case OPT_HELP:
 				print_usage(argv[0]);
 				exit(0);
+			default:
+				break;
 			}
 		} else {
 			print_usage(argv[0]);
@@ -452,13 +454,16 @@ int main(int argc, char** argv) {
 					break;
 				}
 				break;
-			case EVFILT_READ:
+			case EVFILT_READ: {
 				auto* cmd = (Command*)ev.udata;
 				for (int i = 0; i < 2; i++) {
 					if (ev.ident == cmd->pipes[i][0]) {
 						read_child_output(cmd, i, watched_fds);
 					}
 				}
+				break;
+			}
+			default:
 				break;
 			}
 		} else {

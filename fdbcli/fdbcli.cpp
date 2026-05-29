@@ -1051,6 +1051,8 @@ struct CLIOptions {
 		case OPT_BUILD_FLAGS:
 			printBuildInformation();
 			return FDB_EXIT_SUCCESS;
+		default:
+			break;
 		}
 		return -1;
 	}

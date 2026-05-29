@@ -4083,6 +4083,8 @@ int main(int argc, char* argv[]) {
 					restoreMode = parsedMode.get();
 				}
 				break;
+			default:
+				break;
 			}
 		}
 
