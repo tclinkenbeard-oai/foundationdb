@@ -129,11 +129,11 @@ using namespace std::literals;
 
 // clang-format off
 enum {
-	OPT_CONNFILE, OPT_SEEDCONNFILE, OPT_SEEDCONNSTRING, OPT_ROLE, OPT_LISTEN, OPT_PUBLICADDR, OPT_DATAFOLDER, OPT_LOGFOLDER, OPT_PARENTPID, OPT_TRACER, OPT_NEWCONSOLE,
+	OPT_CONNFILE, OPT_SEEDCONNFILE, OPT_SEEDCONNSTRING, OPT_ROLE, OPT_LISTEN, OPT_PUBLICADDR, OPT_DATAFOLDER, OPT_TLOG_SPILL_DATAFOLDER, OPT_LOGFOLDER, OPT_PARENTPID, OPT_TRACER, OPT_NEWCONSOLE,
 	OPT_NOBOX, OPT_TESTFILE, OPT_RESTARTING, OPT_RESTORING, OPT_RANDOMSEED, OPT_KEY, OPT_MEMLIMIT, OPT_VMEMLIMIT, OPT_STORAGEMEMLIMIT, OPT_CACHEMEMLIMIT, OPT_MACHINEID,
 	OPT_DCID, OPT_MACHINE_CLASS, OPT_BUGGIFY, OPT_VERSION, OPT_BUILD_FLAGS, OPT_CRASHONERROR, OPT_HELP, OPT_NETWORKIMPL, OPT_NOBUFSTDOUT, OPT_BUFSTDOUTERR,
 	OPT_TRACECLOCK, OPT_NUMTESTERS, OPT_DEVHELP, OPT_PRINT_CODE_PROBES, OPT_ROLLSIZE, OPT_MAXLOGS, OPT_MAXLOGSSIZE, OPT_KNOB, OPT_UNITTESTPARAM, OPT_TESTSERVERS, OPT_TEST_ON_SERVERS, OPT_METRICSCONNFILE,
-	OPT_METRICSPREFIX, OPT_LOGGROUP, OPT_LOCALITY, OPT_IO_TRUST_SECONDS, OPT_IO_TRUST_WARN_ONLY, OPT_FILESYSTEM, OPT_PROFILER_RSS_SIZE, OPT_KVFILE,
+	OPT_METRICSPREFIX, OPT_LOGGROUP, OPT_LOCALITY, OPT_IO_TRUST_SECONDS, OPT_IO_TRUST_WARN_ONLY, OPT_FILESYSTEM, OPT_TLOG_SPILL_FILESYSTEM, OPT_PROFILER_RSS_SIZE, OPT_KVFILE,
 	OPT_TRACE_FORMAT, OPT_WHITELIST_BINPATH, OPT_BLOB_CREDENTIALS, OPT_PROXY, OPT_CONFIG_PATH, OPT_USE_TEST_CONFIG_DB, OPT_NO_CONFIG_DB, OPT_FAULT_INJECTION, OPT_PROFILER, OPT_PRINT_SIMTIME,
 	OPT_FLOW_PROCESS_NAME, OPT_FLOW_PROCESS_ENDPOINT, OPT_IP_TRUSTED_MASK, OPT_KMS_CONN_DISCOVERY_URL_FILE, OPT_KMS_CONNECTOR_TYPE, OPT_KMS_REST_ALLOW_NOT_SECURE_CONECTION, OPT_KMS_CONN_VALIDATION_TOKEN_DETAILS,
 	OPT_KMS_CONN_GET_ENCRYPTION_KEYS_ENDPOINT, OPT_KMS_CONN_GET_LATEST_ENCRYPTION_KEYS_ENDPOINT, OPT_KMS_CONN_GET_BLOB_METADATA_ENDPOINT, OPT_NEW_CLUSTER_KEY, OPT_AUTHZ_PUBLIC_KEY_FILE, OPT_USE_FUTURE_PROTOCOL_VERSION, OPT_CONSISTENCY_CHECK_URGENT_MODE
@@ -152,10 +152,12 @@ CSimpleOpt::SOption g_rgOptions[] = {
 	{ OPT_LISTEN,                "--listen-address",            SO_REQ_SEP },
 #ifdef __linux__
 	{ OPT_FILESYSTEM,           "--data-filesystem",            SO_REQ_SEP },
+	{ OPT_TLOG_SPILL_FILESYSTEM, "--tlog-spill-filesystem",     SO_REQ_SEP },
 	{ OPT_PROFILER_RSS_SIZE,    "--rsssize",                    SO_REQ_SEP },
 #endif
 	{ OPT_DATAFOLDER,            "-d",                          SO_REQ_SEP },
 	{ OPT_DATAFOLDER,            "--datadir",                   SO_REQ_SEP },
+	{ OPT_TLOG_SPILL_DATAFOLDER, "--tlog-spill-datadir",        SO_REQ_SEP },
 	{ OPT_LOGFOLDER,             "-L",                          SO_REQ_SEP },
 	{ OPT_LOGFOLDER,             "--logdir",                    SO_REQ_SEP },
 	{ OPT_ROLLSIZE,              "-Rs",                         SO_REQ_SEP },
@@ -652,10 +654,16 @@ static void printUsage(const char* name, bool devhelp) {
 	                 " mounted at the specified PATH. This checks that the device at PATH"
 	                 " is currently mounted and that any data files get written to the"
 	                 " same device.");
+	printOptionUsage("--tlog-spill-filesystem PATH",
+	                 " Allows tlog spill data files to be written to an additional drive"
+	                 " mounted at the specified PATH when --data-filesystem is used.");
 #endif
 	printOptionUsage("-d PATH, --datadir PATH",
 	                 " Store data files in the given folder (must be unique for each"
 	                 " fdbserver instance on a given machine).");
+	printOptionUsage("--tlog-spill-datadir PATH",
+	                 " Store tlog spill data files in the given folder. The default is"
+	                 " --datadir. The folder must be unique for each fdbserver instance.");
 	printOptionUsage("-L PATH, --logdir PATH", " Store log files in the given folder (default is `.').");
 	printOptionUsage("--logsize SIZE",
 	                 "Roll over to a new log file after the current log file"
@@ -1065,8 +1073,8 @@ enum class ServerRole {
 };
 struct CLIOptions {
 	std::string commandLine;
-	std::string fileSystemPath, dataFolder, connFile, seedConnFile, seedConnString,
-	    logFolder = ".", metricsConnFile, metricsPrefix, newClusterKey, authzPublicKeyFile;
+	std::string fileSystemPath, tLogSpillFileSystemPath, dataFolder, tLogSpillDataFolder, connFile, seedConnFile,
+	    seedConnString, logFolder = ".", metricsConnFile, metricsPrefix, newClusterKey, authzPublicKeyFile;
 	std::string logGroup = "default";
 	uint64_t rollsize = TRACE_DEFAULT_ROLL_SIZE;
 	uint64_t maxLogsSize = TRACE_DEFAULT_MAX_LOGS_SIZE;
@@ -1383,6 +1391,10 @@ private:
 				fileSystemPath = args.OptionArg();
 				break;
 			}
+			case OPT_TLOG_SPILL_FILESYSTEM: {
+				tLogSpillFileSystemPath = args.OptionArg();
+				break;
+			}
 			case OPT_PROFILER_RSS_SIZE: {
 				const char* a = args.OptionArg();
 				char* end;
@@ -1397,6 +1409,9 @@ private:
 #endif
 			case OPT_DATAFOLDER:
 				dataFolder = args.OptionArg();
+				break;
+			case OPT_TLOG_SPILL_DATAFOLDER:
+				tLogSpillDataFolder = args.OptionArg();
 				break;
 			case OPT_LOGFOLDER:
 				logFolder = args.OptionArg();
@@ -2191,9 +2206,20 @@ int main(int argc, char* argv[]) {
 				}
 			}
 
+			if (!opts.tLogSpillFileSystemPath.empty() && opts.fileSystemPath.empty()) {
+				fprintf(stderr, "ERROR: --tlog-spill-filesystem requires --data-filesystem\n");
+				flushAndExit(FDB_EXIT_ERROR);
+			}
+			std::vector<std::string> fileSystemPaths;
+			if (!opts.fileSystemPath.empty()) {
+				fileSystemPaths.push_back(opts.fileSystemPath);
+			}
+			if (!opts.tLogSpillFileSystemPath.empty()) {
+				fileSystemPaths.push_back(opts.tLogSpillFileSystemPath);
+			}
 			// Use a negative ioTimeout to indicate warn-only
 			Net2FileSystem::newFileSystem(opts.fileIoWarnOnly ? -opts.fileIoTimeout : opts.fileIoTimeout,
-			                              opts.fileSystemPath);
+			                              fileSystemPaths);
 			g_network->initMetrics();
 			FlowTransport::transport().initMetrics();
 		}
@@ -2224,7 +2250,9 @@ int main(int argc, char* argv[]) {
 		    .detail("Version", FDB_VT_VERSION)
 		    .detail("PackageName", FDB_VT_PACKAGE_NAME)
 		    .detail("FileSystem", opts.fileSystemPath)
+		    .detail("TLogSpillFileSystem", opts.tLogSpillFileSystemPath)
 		    .detail("DataFolder", opts.dataFolder)
+		    .detail("TLogSpillDataFolder", opts.tLogSpillDataFolder)
 		    .detail("WorkingDirectory", cwd)
 		    .detail("ClusterFile", opts.connectionFile ? opts.connectionFile->toString() : "")
 		    .detail("ConnectionString",
@@ -2424,12 +2452,14 @@ int main(int argc, char* argv[]) {
 				auto dataFolder = opts.dataFolder;
 				if (!dataFolder.size())
 					dataFolder = format("fdb/%d/", opts.publicAddresses.address.port); // SOMEDAY: Better default
+				auto tLogSpillDataFolder = opts.tLogSpillDataFolder.empty() ? dataFolder : opts.tLogSpillDataFolder;
 
 				std::vector<Future<Void>> actors(listenErrors.begin(), listenErrors.end());
 				actors.push_back(fdbd(opts.connectionFile,
 				                      opts.localities,
 				                      opts.processClass,
 				                      dataFolder,
+				                      tLogSpillDataFolder,
 				                      dataFolder,
 				                      opts.storageMemLimit,
 				                      opts.metricsConnFile,

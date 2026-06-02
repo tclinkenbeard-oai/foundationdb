@@ -78,7 +78,11 @@ ACTOR Future<int> spawnProcess(std::string binPath,
                                IClosable* parent = nullptr);
 
 // helper to run all the work related to running the exec command
-ACTOR Future<int> execHelper(ExecCmdValueString* execArg, UID snapUID, std::string folder, std::string role);
+ACTOR Future<int> execHelper(ExecCmdValueString* execArg,
+                             UID snapUID,
+                             std::string folder,
+                             std::string role,
+                             Optional<std::string> tLogSpillFolder = Optional<std::string>());
 
 // set the data version for the specified storage server UID
 void setDataVersion(UID uid, Version version);

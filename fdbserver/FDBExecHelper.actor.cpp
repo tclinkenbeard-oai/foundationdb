@@ -403,7 +403,11 @@ ACTOR Future<int> spawnProcess(std::string path,
 }
 #endif
 
-ACTOR Future<int> execHelper(ExecCmdValueString* execArg, UID snapUID, std::string folder, std::string role) {
+ACTOR Future<int> execHelper(ExecCmdValueString* execArg,
+                             UID snapUID,
+                             std::string folder,
+                             std::string role,
+                             Optional<std::string> tLogSpillFolder) {
 	state Standalone<StringRef> uidStr(snapUID.toString());
 	state int err = 0;
 	state Future<int> cmdErr;
@@ -421,6 +425,10 @@ ACTOR Future<int> execHelper(ExecCmdValueString* execArg, UID snapUID, std::stri
 		// get additional arguments
 		paramList.push_back("--path");
 		paramList.push_back(folder);
+		if (tLogSpillFolder.present()) {
+			paramList.push_back("--tlog-spill-path");
+			paramList.push_back(tLogSpillFolder.get());
+		}
 		const char* version = FDB_VT_VERSION;
 		paramList.push_back("--version");
 		paramList.push_back(version);
