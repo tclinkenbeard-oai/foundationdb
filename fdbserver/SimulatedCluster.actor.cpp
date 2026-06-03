@@ -804,6 +804,9 @@ ACTOR Future<ISimulator::KillType> simulatedFDBDRebooter(Reference<IClusterConne
 		    process,
 		    TaskPriority::DefaultYield)); // Now switch execution to the process on which we will run
 		state Future<ISimulator::KillType> onShutdown = process->onShutdown();
+		// Persist the simulated configuration choice across restart phases by deriving it from the random data folder.
+		state bool useSeparateTLogSpillFolder = dataFolder->back() % 2 == 0;
+		state std::string tLogSpillFolder = useSeparateTLogSpillFolder ? *dataFolder + "-tlog-spill" : *dataFolder;
 
 		try {
 			TraceEvent("SimulatedRebooterStarting")
@@ -822,6 +825,7 @@ ACTOR Future<ISimulator::KillType> simulatedFDBDRebooter(Reference<IClusterConne
 			    .detail("Version", FDB_VT_VERSION)
 			    .detail("PackageName", FDB_VT_PACKAGE_NAME)
 			    .detail("DataFolder", *dataFolder)
+			    .detail("TLogSpillFolder", tLogSpillFolder)
 			    .detail("ConnectionString", connRecord ? connRecord->getConnectionString().toString() : "")
 			    .detailf("ActualTime", "%lld", DEBUG_DETERMINISM ? 0 : time(nullptr))
 			    .detail("CommandLine", "fdbserver -r simulation")
@@ -850,7 +854,7 @@ ACTOR Future<ISimulator::KillType> simulatedFDBDRebooter(Reference<IClusterConne
 					                       localities,
 					                       processClass,
 					                       *dataFolder,
-					                       *dataFolder,
+					                       tLogSpillFolder,
 					                       *coordFolder,
 					                       500e6,
 					                       "",
