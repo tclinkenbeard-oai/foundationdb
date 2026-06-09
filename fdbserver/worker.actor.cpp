@@ -4117,8 +4117,7 @@ TEST_CASE("/fdbserver/storageengine/clearInflightCommits") {
 }
 } // anonymous namespace
 
-ACTOR Future<UID> createAndLockProcessIdFile(std::string folder,
-                                             Optional<UID> expectedProcessIDUid = Optional<UID>()) {
+ACTOR Future<UID> createAndLockProcessIdFile(std::string folder, Optional<UID> expectedProcessIDUid = Optional<UID>()) {
 	state UID processIDUid;
 	platform::createDirectory(folder);
 
