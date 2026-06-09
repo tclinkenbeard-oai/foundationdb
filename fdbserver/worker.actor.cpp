@@ -4436,7 +4436,8 @@ ACTOR Future<Void> fdbd(Reference<IClusterConnectionRecord> connRecord,
 		localities.set(LocalityData::keyProcessId, processIDUid.toString());
 		// Only one process can execute on a dataFolder from this point onwards
 		if (dataFolder != tLogSpillFolder) {
-			wait(createAndLockProcessIdFile(tLogSpillFolder, processIDUid));
+			UID tLogSpillProcessIDUid = wait(createAndLockProcessIdFile(tLogSpillFolder, processIDUid));
+			ASSERT(tLogSpillProcessIDUid == processIDUid);
 		}
 
 		wait(testAndUpdateSoftwareVersionCompatibility(dataFolder, processIDUid));
