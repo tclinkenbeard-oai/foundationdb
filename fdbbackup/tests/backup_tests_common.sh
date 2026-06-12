@@ -272,14 +272,25 @@ function run_backup {
 
   # Stop the backup to finalize it (only if still running)
   log "Stopping backup to finalize restorable state"
+  # Isolate this command's trace so an expected backup_unneeded race can discard only its log.
+  local discontinue_log_dir
+  if ! discontinue_log_dir=$(mktemp -d "${local_scratch_dir}/discontinue_logs.XXXXXX"); then
+    err "Failed to create discontinue trace directory"
+    return 1
+  fi
   set +e
-  stop_output=$("${local_build_dir}"/bin/fdbbackup discontinue -t "${local_tag}" -C "${local_scratch_dir}/loopback_cluster/fdb.cluster" --log --logdir="${local_scratch_dir}" 2>&1)
+  stop_output=$("${local_build_dir}"/bin/fdbbackup discontinue -t "${local_tag}" -C "${local_scratch_dir}/loopback_cluster/fdb.cluster" --log --logdir="${discontinue_log_dir}" 2>&1)
   stop_exit_code=$?
   set -e
   
   if [[ $stop_exit_code -ne 0 ]]; then
     if output_matches "${stop_output}" "already discontinued\|not running\|unneeded"; then
       log "Backup already completed and finalized - this is success!"
+      if grep -r 'Severity="40"' "${discontinue_log_dir}" | grep -Ev 'Error="backup_(unneeded|duplicate)"'; then
+        err "Unexpected Severity=40 error while discontinuing backup"
+        return 1
+      fi
+      rm -rf "${discontinue_log_dir}"
     else
       err "Failed to stop backup: ${stop_output}"
       return 1
