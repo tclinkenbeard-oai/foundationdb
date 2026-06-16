@@ -140,7 +140,6 @@ upload_release_artifacts() {
   done
 
   echo "--- Uploading release artifacts"
-  echo "~~~ Upload destination"
   echo "Uploading release binaries and debug symbols to ${release_dest}"
   (
     cd "${binary_dir}"
@@ -149,6 +148,175 @@ upload_release_artifacts() {
         buildkite-agent artifact upload "${artifact}"
     done
   )
+}
+
+project_version() {
+  sed -n 's/^[[:space:]]*VERSION \([^[:space:]]*\).*/\1/p' CMakeLists.txt | head -n 1
+}
+
+minor_version() {
+  local version="${1}"
+  local major
+  local minor
+
+  IFS=. read -r major minor _ <<< "${version}"
+  if [[ -z "${major}" || -z "${minor}" ]]; then
+    return 1
+  fi
+  echo "${major}.${minor}"
+}
+
+acr_name_from_image() {
+  local image="${1}"
+  local registry="${image%%/*}"
+
+  if [[ "${registry}" == *.azurecr.io ]]; then
+    echo "${registry%.azurecr.io}"
+  fi
+}
+
+login_to_acr_registries() {
+  local logged_in=" "
+  local image
+  local acr_name
+
+  for image in "$@"; do
+    acr_name="$(acr_name_from_image "${image}")"
+    if [[ -z "${acr_name}" ]]; then
+      continue
+    fi
+    if [[ "${logged_in}" == *" ${acr_name} "* ]]; then
+      continue
+    fi
+    echo "Logging in to ${acr_name}.azurecr.io"
+    az acr login --name "${acr_name}"
+    logged_in+="${acr_name} "
+  done
+}
+
+publish_backup_agent_image() {
+  local release_version="${FDB_RELEASE_BLOB_VERSION:-0.0.0}"
+  local binary_dir="build_output/packages/bin"
+  local backup_agent="${binary_dir}/backup_agent"
+  local fdbcli="${binary_dir}/fdbcli"
+  local client_library="build_output/packages/lib/libfdb_c.so"
+  local base_version="${FDB_BACKUP_AGENT_IMAGE_BASE_VERSION:-}"
+  local base_minor_version
+  local base_repository="${FDB_BACKUP_AGENT_IMAGE_BASE_REPOSITORY:-openaiapibase.azurecr.io/mirror/foundationdb/foundationdb}"
+  local base_image="${FDB_BACKUP_AGENT_IMAGE_BASE_IMAGE:-}"
+  local extra_library_version="${FDB_BACKUP_AGENT_IMAGE_EXTRA_LIBRARY_VERSION:-7.4.3}"
+  local extra_library_image="${FDB_BACKUP_AGENT_IMAGE_EXTRA_LIBRARY_IMAGE:-}"
+  local platform="${FDB_BACKUP_AGENT_IMAGE_PLATFORM:-linux/amd64}"
+  local dest_image="${FDB_BACKUP_AGENT_DEST_IMAGE:-}"
+  local staging_dest_image
+  local image_context
+  local build_args=()
+
+  if [[ -z "${FDB_RELEASE_BLOB_VERSION:-}" ]]; then
+    echo "FDB_RELEASE_BLOB_VERSION not set; skipping backup_agent image publish"
+    FDB_BACKUP_AGENT_IMAGE_PUSH=0
+  fi
+
+  release_version="$(sanitize_path_component "${release_version}")"
+  if [[ -z "${base_version}" ]]; then
+    base_version="$(project_version)"
+  fi
+  if [[ -z "${base_version}" ]]; then
+    echo "Could not determine backup_agent base image version" >&2
+    return 1
+  fi
+  if ! base_minor_version="$(minor_version "${base_version}")"; then
+    echo "Could not determine backup_agent base image minor version from ${base_version}" >&2
+    return 1
+  fi
+  if [[ -z "${base_image}" ]]; then
+    base_image="${base_repository}:${base_version}"
+  fi
+  if [[ -z "${extra_library_image}" ]]; then
+    extra_library_image="${base_repository}:${extra_library_version}"
+  fi
+
+  if [[ -z "${dest_image}" ]]; then
+    dest_image="openaiapibase.azurecr.io/mirror/foundationdb/foundationdb:${release_version}"
+  fi
+  # Empty is intentionally treated as unset; staging publication is always enabled.
+  if [[ -n "${FDB_BACKUP_AGENT_STAGING_DEST_IMAGE:-}" ]]; then
+    staging_dest_image="${FDB_BACKUP_AGENT_STAGING_DEST_IMAGE}"
+  else
+    staging_dest_image="openaiapistaging.azurecr.io/api/foundationdb/foundationdb:${release_version}"
+  fi
+
+  if [[ ! -f "${backup_agent}" ]]; then
+    echo "Missing backup_agent binary ${backup_agent}" >&2
+    return 1
+  fi
+  if [[ ! -f "${fdbcli}" ]]; then
+    echo "Missing fdbcli binary ${fdbcli}" >&2
+    return 1
+  fi
+  if [[ ! -f "${client_library}" ]]; then
+    echo "Missing backup_agent client library ${client_library}" >&2
+    return 1
+  fi
+
+  image_context="$(mktemp -d /tmp/fdb-backup-agent-image.XXXXXX)"
+  cp "${backup_agent}" "${image_context}/backup_agent"
+  cp "${fdbcli}" "${image_context}/fdbcli"
+  cp "${client_library}" "${image_context}/libfdb_c.so"
+
+  echo "--- Publishing backup_agent image"
+  echo "~~~ Image inputs"
+  echo "Using backup_agent artifact ${backup_agent}"
+  echo "Using base FoundationDB image ${base_image}"
+  echo "Using branch client library ${client_library} as libfdb_c_${base_minor_version}.so"
+  echo "Copying extra client libraries from ${extra_library_image}"
+  echo "Publishing ${dest_image}"
+
+  build_args=(
+    --platform "${platform}"
+    --build-arg "BASE_FDB_IMAGE=${base_image}"
+    --build-arg "BASE_FDB_MINOR_VERSION=${base_minor_version}"
+    --build-arg "EXTRA_FDB_LIBRARY_IMAGE=${extra_library_image}"
+    --tag "${dest_image}"
+  )
+  if [[ "${FDB_BACKUP_AGENT_IMAGE_PUSH:-1}" == "0" ]]; then
+    echo "FDB_BACKUP_AGENT_IMAGE_PUSH=0; skipping backup_agent image publish"
+    staging_dest_image=""
+    build_args+=(--load)
+  fi
+
+  if [[ -n "${staging_dest_image}" ]]; then
+    echo "Publishing ${staging_dest_image}"
+    build_args+=(--tag "${staging_dest_image}" --push)
+  fi
+
+  login_to_acr_registries "${dest_image}" "${staging_dest_image}" "${base_image}" "${extra_library_image}"
+  if ! docker buildx build \
+    "${build_args[@]}" \
+    -f building/docker/Dockerfile.backup-agent \
+    "${image_context}"; then
+    rm -rf "${image_context}"
+    return 1
+  fi
+
+  if [[ "${FDB_BACKUP_AGENT_IMAGE_PUSH:-1}" != "0" ]]; then
+    if ! docker pull --platform "${platform}" "${dest_image}"; then
+      rm -rf "${image_context}"
+      return 1
+    fi
+  fi
+
+  echo "--- Verifying backup_agent image"
+  if ! docker run --rm \
+    --platform "${platform}" \
+    --entrypoint /usr/bin/fdbbackup \
+    "${dest_image}" \
+    --version; then
+    rm -rf "${image_context}"
+    return 1
+  fi
+
+  rm -rf "${image_context}"
 }
 
 collect_changed_cpp_header_files() {
@@ -268,6 +436,7 @@ docker buildx build \
   -f building/docker/Dockerfile .
 save_buildx_cache
 upload_release_artifacts
+publish_backup_agent_image
 
 tarball_dir="build_output/packages"
 shopt -s nullglob
@@ -278,14 +447,14 @@ if (( ${#tarballs[@]} )); then
   mapfile -t tarballs < <(printf '%s\n' "${tarballs[@]}" | sort)
   selected_tarball="${tarballs[0]}"
   selected_tarball_basename="$(basename "${selected_tarball}")"
+
+  echo "--- Uploading correctness packages"
   echo "~~~ Tarball selection"
   if (( ${#tarballs[@]} > 1 )); then
     echo "Found ${#tarballs[@]} correctness tarballs; submitting only ${selected_tarball_basename}"
   else
     echo "Found one correctness tarball: ${selected_tarball_basename}"
   fi
-
-  echo "--- Uploading correctness packages"
   dest="$(resolve_dest)"
   selected_tarball_relative_path="${selected_tarball#./}"
   selected_tarball_url="${dest}/${selected_tarball_relative_path}"

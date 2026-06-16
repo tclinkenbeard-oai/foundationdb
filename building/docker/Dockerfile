@@ -1,4 +1,7 @@
-FROM foundationdb/build:rockylinux9-latest AS base
+# Lock the version of rocky linux to one that is the same as the base image that we use for the
+# backup agent
+FROM openaiapibase.azurecr.io/mirror/foundationdb/rockylinux9-latest@sha256:27e84fcd4a82e63b1f499cf199c84fe9a1831c8858947b3d9e0434b22317075a AS base
+
 
 ARG ENABLE_PYTHON_AC=0
 
