@@ -1,0 +1,676 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+dest_root="https://appliedciblobdata.blob.core.windows.net/fdb-ci-artifacts"
+release_dest_root="https://appliedciblobdata.blob.core.windows.net/fdb-release-artifacts"
+readonly default_joshua_proxy_addr="joshua-proxy-joshua-proxy.gateway.turtle-0s.internal.api.openai.org:443"
+readonly default_joshua_runs="10000"
+readonly default_joshua_smoke_timeout_seconds="10"
+readonly default_cache_scope="global"
+readonly default_cache_namespace="foundationdb"
+readonly default_storage_account="appliedciblobdata"
+readonly default_blob_container="fdb-ci-artifacts"
+readonly build_step_key="general-build"
+readonly step_artifact_dir=".buildkite-artifacts"
+readonly backup_agent_inputs_artifact="${step_artifact_dir}/backup-agent-image-inputs.tar.gz"
+readonly correctness_artifact="${step_artifact_dir}/correctness.tar.gz"
+
+
+if ! command -v buildkite-agent >/dev/null; then
+  echo "buildkite-agent is required for bkbuildentrypoint.sh" >&2
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null; then
+  echo "python3 is required for bkbuildentrypoint.sh" >&2
+  exit 1
+fi
+
+if ! command -v az >/dev/null; then
+  echo "az is required for bkbuildentrypoint.sh" >&2
+  exit 1
+fi
+
+
+resolve_dest() {
+  if [[ -n "${BUILDKITE_PIPELINE_ID:-}" && -n "${BUILDKITE_BUILD_ID:-}" && -n "${BUILDKITE_JOB_ID:-}" ]]; then
+    echo "${dest_root}/${BUILDKITE_PIPELINE_ID}/${BUILDKITE_BUILD_ID}/${BUILDKITE_JOB_ID}"
+  else
+    echo "${dest_root}"
+  fi
+}
+
+sanitize_path_component() {
+  local value="${1:-unknown}"
+  # Use a locale-stable character class; keep '-' last so it is treated literally.
+  value="$(printf '%s' "${value}" | LC_ALL=C tr '/:@ ' '_' | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')"
+  if [[ -z "${value}" ]]; then
+    echo "unknown"
+  else
+    echo "${value}"
+  fi
+}
+
+resolve_cache_dest() {
+  local cache_scope
+  local cache_namespace
+  local arch
+  local python_ac
+
+  cache_scope="$(sanitize_path_component "${BUILDKITE_CACHE_SCOPE:-${default_cache_scope}}")"
+  cache_namespace="$(sanitize_path_component "${BUILDKITE_CACHE_NAMESPACE:-${default_cache_namespace}}")"
+  arch="$(sanitize_path_component "$(uname -m)")"
+  python_ac="$(sanitize_path_component "${ENABLE_PYTHON_AC:-0}")"
+  echo "${dest_root}/cache/${cache_namespace}/${cache_scope}/${arch}/pyac-${python_ac}"
+}
+
+resolve_sccache_key_prefix() {
+  local cache_scope
+  local cache_namespace
+  local arch
+  local python_ac
+
+  cache_scope="$(sanitize_path_component "${BUILDKITE_CACHE_SCOPE:-${default_cache_scope}}")"
+  cache_namespace="$(sanitize_path_component "${BUILDKITE_CACHE_NAMESPACE:-${default_cache_namespace}}")"
+  arch="$(sanitize_path_component "$(uname -m)")"
+  python_ac="$(sanitize_path_component "${ENABLE_PYTHON_AC:-0}")"
+  echo "sccache/${cache_namespace}/${cache_scope}/${arch}/pyac-${python_ac}"
+}
+
+create_sccache_env_file() {
+  local storage_account="${SCCACHE_AZURE_STORAGE_ACCOUNT:-${default_storage_account}}"
+  local blob_container="${SCCACHE_AZURE_BLOB_CONTAINER:-${default_blob_container}}"
+  local expiry
+  local sas_token
+  local env_file
+
+  expiry="$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')"
+  sas_token="$(
+    az storage container generate-sas \
+      --auth-mode login \
+      --account-name "${storage_account}" \
+      --name "${blob_container}" \
+      --permissions rw \
+      --expiry "${expiry}" \
+      --as-user \
+      -o tsv
+  )"
+  env_file="$(mktemp /tmp/fdb-sccache-env.XXXXXX)"
+  printf 'SCCACHE_AZURE_CONNECTION_STRING=BlobEndpoint=https://%s.blob.core.windows.net;SharedAccessSignature=%s\nSCCACHE_AZURE_BLOB_CONTAINER=%s\nSCCACHE_AZURE_KEY_PREFIX=%s\n' \
+    "${storage_account}" \
+    "${sas_token}" \
+    "${blob_container}" \
+    "$(resolve_sccache_key_prefix)" \
+    > "${env_file}"
+  echo "${env_file}"
+}
+
+buildx_cache_file_name() {
+  local cache_version
+  cache_version="$(sanitize_path_component "${BUILDX_CACHE_VERSION:-v1}")"
+  if tar --help 2>/dev/null | grep -q -- '--zstd'; then
+    echo "buildx-cache-${cache_version}.tar.zst"
+  else
+    echo "buildx-cache-${cache_version}.tar.gz"
+  fi
+}
+
+dir_has_files() {
+  local dir="${1}"
+  local found=""
+  if [[ ! -d "${dir}" ]]; then
+    return 1
+  fi
+  found="$(find "${dir}" -mindepth 1 -print -quit 2>/dev/null || true)"
+  [[ -n "${found}" ]]
+}
+
+restore_buildx_cache_from_url() {
+  python3 building/scripts/restore_buildx_cache_from_url.py "${1}"
+}
+
+restore_buildx_cache() {
+  local cache_file
+  local cache_dest
+  local cache_url
+
+  if ! command -v curl >/dev/null; then
+    echo "curl not found; skipping remote build cache restore"
+    return
+  fi
+
+  cache_file="$(buildx_cache_file_name)"
+  cache_dest="$(resolve_cache_dest)"
+  cache_url="${cache_dest}/${cache_file}"
+
+  echo "--- Build cache restore"
+  echo "Trying shared build cache ${cache_url}"
+  if restore_buildx_cache_from_url "${cache_url}"; then
+    echo "Shared build cache restored"
+    return
+  fi
+
+  echo "Shared build cache unavailable; continuing with a cold cache"
+}
+
+save_buildx_cache() {
+  local cache_file
+  local cache_dest
+
+  cache_file="$(buildx_cache_file_name)"
+  cache_dest="$(resolve_cache_dest)"
+  python3 building/scripts/save_buildx_cache.py \
+    --cache-file "${cache_file}" \
+    --cache-dest "${cache_dest}"
+}
+
+upload_release_artifacts() {
+  local release_version="${FDB_RELEASE_BLOB_VERSION:-}"
+  local release_arch
+  local release_dest
+  local binary_dir="build_output/packages/bin"
+  local binaries=(fdbserver fdbbackup fdbrestore backup_agent fdbcli fdbmonitor)
+  local debug_symbols=(fdbserver.debug fdbbackup.debug fdbcli.debug fdbmonitor.debug)
+  local artifacts=("${binaries[@]}" "${debug_symbols[@]}")
+  local artifact
+
+  if [[ -z "${release_version}" ]]; then
+    echo "FDB_RELEASE_BLOB_VERSION not set; skipping release artifact upload"
+    return 0
+  fi
+
+  release_version="$(sanitize_path_component "${release_version}")"
+  release_arch="$(sanitize_path_component "${FDB_RELEASE_BLOB_ARCH:-$(uname -m)}")"
+  release_dest="${release_dest_root}/${release_version}/${release_arch}"
+
+  for artifact in "${artifacts[@]}"; do
+    if [[ ! -f "${binary_dir}/${artifact}" ]]; then
+      echo "Missing release artifact ${binary_dir}/${artifact}" >&2
+      return 1
+    fi
+  done
+
+  echo "--- Uploading release artifacts"
+  echo "Uploading release binaries and debug symbols to ${release_dest}"
+  (
+    cd "${binary_dir}"
+    for artifact in "${artifacts[@]}"; do
+      BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${release_dest}" \
+        buildkite-agent artifact upload "${artifact}"
+    done
+  )
+}
+
+project_version() {
+  sed -n 's/^[[:space:]]*VERSION \([^[:space:]]*\).*/\1/p' CMakeLists.txt | head -n 1
+}
+
+minor_version() {
+  local version="${1}"
+  local major
+  local minor
+
+  IFS=. read -r major minor _ <<< "${version}"
+  if [[ -z "${major}" || -z "${minor}" ]]; then
+    return 1
+  fi
+  echo "${major}.${minor}"
+}
+
+acr_name_from_image() {
+  local image="${1}"
+  local registry="${image%%/*}"
+
+  if [[ "${registry}" == *.azurecr.io ]]; then
+    echo "${registry%.azurecr.io}"
+  fi
+}
+
+login_to_acr_registries() {
+  local logged_in=" "
+  local image
+  local acr_name
+
+  for image in "$@"; do
+    acr_name="$(acr_name_from_image "${image}")"
+    if [[ -z "${acr_name}" ]]; then
+      continue
+    fi
+    if [[ "${logged_in}" == *" ${acr_name} "* ]]; then
+      continue
+    fi
+    echo "Logging in to ${acr_name}.azurecr.io"
+    az acr login --name "${acr_name}"
+    logged_in+="${acr_name} "
+  done
+}
+
+publish_backup_agent_image() {
+  local release_version="${FDB_RELEASE_BLOB_VERSION:-0.0.0}"
+  local binary_dir="build_output/packages/bin"
+  local backup_agent="${binary_dir}/backup_agent"
+  local fdbcli="${binary_dir}/fdbcli"
+  local client_library="build_output/packages/lib/libfdb_c.so"
+  local base_version="${FDB_BACKUP_AGENT_IMAGE_BASE_VERSION:-}"
+  local base_minor_version
+  local base_repository="${FDB_BACKUP_AGENT_IMAGE_BASE_REPOSITORY:-openaiapibase.azurecr.io/mirror/foundationdb/foundationdb}"
+  local base_image="${FDB_BACKUP_AGENT_IMAGE_BASE_IMAGE:-}"
+  local extra_library_version="${FDB_BACKUP_AGENT_IMAGE_EXTRA_LIBRARY_VERSION:-7.4.3}"
+  local extra_library_image="${FDB_BACKUP_AGENT_IMAGE_EXTRA_LIBRARY_IMAGE:-}"
+  local platform="${FDB_BACKUP_AGENT_IMAGE_PLATFORM:-linux/amd64}"
+  local dest_image="${FDB_BACKUP_AGENT_DEST_IMAGE:-}"
+  local staging_dest_image
+  local image_context
+  local build_args=()
+
+  if [[ -z "${FDB_RELEASE_BLOB_VERSION:-}" ]]; then
+    echo "FDB_RELEASE_BLOB_VERSION not set; building backup_agent image locally without publishing"
+    FDB_BACKUP_AGENT_IMAGE_PUSH=0
+  fi
+
+  release_version="$(sanitize_path_component "${release_version}")"
+  if [[ -z "${base_version}" ]]; then
+    base_version="$(project_version)"
+  fi
+  if [[ -z "${base_version}" ]]; then
+    echo "Could not determine backup_agent base image version" >&2
+    return 1
+  fi
+  if ! base_minor_version="$(minor_version "${base_version}")"; then
+    echo "Could not determine backup_agent base image minor version from ${base_version}" >&2
+    return 1
+  fi
+  if [[ -z "${base_image}" ]]; then
+    base_image="${base_repository}:${base_version}"
+  fi
+  if [[ -z "${extra_library_image}" ]]; then
+    extra_library_image="${base_repository}:${extra_library_version}"
+  fi
+
+  if [[ -z "${dest_image}" ]]; then
+    dest_image="openaiapibase.azurecr.io/mirror/foundationdb/foundationdb:${release_version}"
+  fi
+  # Empty is intentionally treated as unset; staging publication is always enabled.
+  if [[ -n "${FDB_BACKUP_AGENT_STAGING_DEST_IMAGE:-}" ]]; then
+    staging_dest_image="${FDB_BACKUP_AGENT_STAGING_DEST_IMAGE}"
+  else
+    staging_dest_image="openaiapistaging.azurecr.io/api/foundationdb/foundationdb:${release_version}"
+  fi
+
+  if [[ ! -f "${backup_agent}" ]]; then
+    echo "Missing backup_agent binary ${backup_agent}" >&2
+    return 1
+  fi
+  if [[ ! -f "${fdbcli}" ]]; then
+    echo "Missing fdbcli binary ${fdbcli}" >&2
+    return 1
+  fi
+  if [[ ! -f "${client_library}" ]]; then
+    echo "Missing backup_agent client library ${client_library}" >&2
+    return 1
+  fi
+
+  image_context="$(mktemp -d /tmp/fdb-backup-agent-image.XXXXXX)"
+  cp "${backup_agent}" "${image_context}/backup_agent"
+  cp "${fdbcli}" "${image_context}/fdbcli"
+  cp "${client_library}" "${image_context}/libfdb_c.so"
+
+  echo "--- Publishing backup_agent image"
+  echo "~~~ Image inputs"
+  echo "Using backup_agent artifact ${backup_agent}"
+  echo "Using base FoundationDB image ${base_image}"
+  echo "Using branch client library ${client_library} as libfdb_c_${base_minor_version}.so"
+  echo "Copying extra client libraries from ${extra_library_image}"
+  echo "Publishing ${dest_image}"
+
+  build_args=(
+    --platform "${platform}"
+    --build-arg "BASE_FDB_IMAGE=${base_image}"
+    --build-arg "BASE_FDB_MINOR_VERSION=${base_minor_version}"
+    --build-arg "EXTRA_FDB_LIBRARY_IMAGE=${extra_library_image}"
+    --tag "${dest_image}"
+  )
+  if [[ "${FDB_BACKUP_AGENT_IMAGE_PUSH:-1}" == "0" ]]; then
+    echo "FDB_BACKUP_AGENT_IMAGE_PUSH=0; skipping backup_agent image publish"
+    staging_dest_image=""
+    build_args+=(--load)
+  fi
+
+  if [[ -n "${staging_dest_image}" ]]; then
+    echo "Publishing ${staging_dest_image}"
+    build_args+=(--tag "${staging_dest_image}" --push)
+  fi
+
+  login_to_acr_registries "${dest_image}" "${staging_dest_image}" "${base_image}" "${extra_library_image}"
+  if ! docker buildx build \
+    "${build_args[@]}" \
+    -f building/docker/Dockerfile.backup-agent \
+    "${image_context}"; then
+    rm -rf "${image_context}"
+    return 1
+  fi
+
+  if [[ "${FDB_BACKUP_AGENT_IMAGE_PUSH:-1}" != "0" ]]; then
+    if ! docker pull --platform "${platform}" "${dest_image}"; then
+      rm -rf "${image_context}"
+      return 1
+    fi
+  fi
+
+  echo "--- Verifying backup_agent image"
+  if ! docker run --rm \
+    --platform "${platform}" \
+    --entrypoint /usr/bin/fdbbackup \
+    "${dest_image}" \
+    --version; then
+    rm -rf "${image_context}"
+    return 1
+  fi
+
+  rm -rf "${image_context}"
+}
+
+collect_changed_cpp_header_files() {
+  local diff_range=""
+  local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}"
+  local base_ref=""
+  local merge_base=""
+
+  if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" && -n "${base_branch}" ]]; then
+    base_ref="origin/${base_branch}"
+    if ! git rev-parse --verify --quiet "${base_ref}" >/dev/null; then
+      git fetch --quiet origin "${base_branch}" || true
+    fi
+    if git rev-parse --verify --quiet "${base_ref}" >/dev/null; then
+      if merge_base="$(git merge-base HEAD "${base_ref}")"; then
+        diff_range="${merge_base}...HEAD"
+      fi
+    fi
+  fi
+
+  if [[ -z "${diff_range}" ]]; then
+    if git rev-parse --verify --quiet HEAD~1 >/dev/null; then
+      diff_range="HEAD~1..HEAD"
+    else
+      diff_range="$(git hash-object -t tree /dev/null)..HEAD"
+    fi
+  fi
+
+  git diff --name-only --diff-filter=ACMR "${diff_range}" -- '*.h' '*.cpp'
+}
+
+run_clang_format_check_in_docker() {
+  local changed_files
+  local clang_format_image
+
+  mapfile -t changed_files < <(
+    collect_changed_cpp_header_files | while IFS= read -r path; do
+      [[ -f "${path}" ]] && printf '%s\n' "${path}"
+    done
+  )
+
+  if (( ${#changed_files[@]} == 0 )); then
+    echo "No changed *.h or *.cpp files found; skipping clang-format"
+    return 0
+  fi
+
+  if ! command -v docker >/dev/null; then
+    echo "docker is required to run clang-format check in container" >&2
+    return 1
+  fi
+
+  clang_format_image="${CLANG_FORMAT_IMAGE:-foundationdb/devel:rockylinux9-latest}"
+  if ! docker image inspect "${clang_format_image}" >/dev/null 2>&1; then
+    echo "~~~ Downloading clang-format image"
+    echo "Pulling ${clang_format_image}"
+    docker pull "${clang_format_image}"
+  fi
+
+  echo "~~~ Checking changed files"
+  echo "Checking clang-format for ${#changed_files[@]} changed *.h/*.cpp files in ${clang_format_image}"
+  docker run --rm \
+    -v "$(pwd):/workspace" \
+    -w /workspace \
+    "${clang_format_image}" \
+    clang-format --dry-run -Werror "${changed_files[@]}"
+}
+
+prepare_step_artifacts() {
+  local package_dir="build_output/packages"
+  local tarballs=()
+  local selected_tarball
+
+  rm -rf "${step_artifact_dir}"
+  mkdir -p "${step_artifact_dir}"
+  # backup_agent is a symlink to fdbbackup in the package output. Dereference it
+  # so the downstream job does not extract a dangling symlink without its target.
+  tar -chzf "${backup_agent_inputs_artifact}" \
+    "${package_dir}/bin/backup_agent" \
+    "${package_dir}/bin/fdbcli" \
+    "${package_dir}/lib/libfdb_c.so"
+
+  shopt -s nullglob
+  tarballs=("${package_dir}/correctness"*.tar.gz)
+  shopt -u nullglob
+  if (( ${#tarballs[@]} == 0 )); then
+    echo "No correctness tarballs found under ${package_dir}" >&2
+    return 1
+  fi
+
+  mapfile -t tarballs < <(printf '%s\n' "${tarballs[@]}" | sort)
+  selected_tarball="${tarballs[0]}"
+  if (( ${#tarballs[@]} > 1 )); then
+    echo "Found ${#tarballs[@]} correctness tarballs; handing off only $(basename "${selected_tarball}")"
+  fi
+  cp "${selected_tarball}" "${correctness_artifact}"
+
+  echo "Prepared ${backup_agent_inputs_artifact}"
+  echo "Prepared ${correctness_artifact} from $(basename "${selected_tarball}")"
+}
+
+download_build_artifact() {
+  local artifact="${1}"
+
+  echo "Downloading ${artifact} from ${build_step_key}"
+  buildkite-agent artifact download "${artifact}" . --step "${build_step_key}"
+}
+
+run_mode="${1:-all}"
+case "${run_mode}" in
+  all|build|build-backup-agent-image|submit-joshua) ;;
+  *)
+    echo "Usage: $0 [build|build-backup-agent-image|submit-joshua]" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${run_mode}" == "build-backup-agent-image" ]]; then
+  download_build_artifact "${backup_agent_inputs_artifact}"
+  tar -xzf "${backup_agent_inputs_artifact}"
+  publish_backup_agent_image
+  exit 0
+fi
+
+if [[ "${run_mode}" == "submit-joshua" ]]; then
+  download_build_artifact "${correctness_artifact}"
+  mkdir -p build_output/packages
+  cp "${correctness_artifact}" build_output/packages/correctness.tar.gz
+fi
+
+if [[ "${run_mode}" != "submit-joshua" ]]; then
+echo "--- Blobstore preflight"
+dest="$(resolve_dest)"
+echo "~~~ Creating preflight artifact"
+preflight_file="$(mktemp /tmp/fdb-blobstore-preflight.XXXXXX)"
+trap 'rm -f "${preflight_file}"' EXIT
+printf 'blobstore preflight %s\n' "$(date -u +%FT%TZ)" > "${preflight_file}"
+echo "~~~ Validating artifact upload destination"
+echo "Validating artifact upload destination ${dest}"
+if ! BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${dest}" \
+     buildkite-agent artifact upload "${preflight_file}"; then
+  echo "Failed to validate artifact upload destination" >&2
+  exit 1
+fi
+
+echo "--- Joshua Proxy preflight"
+joshua_proxy_addr="${JOSHUA_PROXY_ADDR:-${default_joshua_proxy_addr}}"
+joshua_smoke_timeout_seconds="${JOSHUA_SMOKE_TIMEOUT_SECONDS:-${default_joshua_smoke_timeout_seconds}}"
+if ! [[ "${joshua_smoke_timeout_seconds}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "JOSHUA_SMOKE_TIMEOUT_SECONDS must be a positive integer, got: ${joshua_smoke_timeout_seconds}" >&2
+  exit 1
+fi
+echo "Checking Joshua Proxy reachability at ${joshua_proxy_addr}"
+smoke_args=(
+  python3 building/joshua_proxy/joshua_proxy_client.py
+  smoke
+  --addr "${joshua_proxy_addr}"
+  --timeout-seconds "${joshua_smoke_timeout_seconds}"
+)
+if [[ "${JOSHUA_PROXY_INSECURE:-}" == "1" ]]; then
+  smoke_args+=(--insecure)
+fi
+if ! "${smoke_args[@]}"; then
+  exit 1
+fi
+
+echo "--- clang-format"
+if ! command -v git >/dev/null; then
+  echo "git not found; skipping clang-format on changed files"
+else
+  run_clang_format_check_in_docker
+fi
+
+echo "--- Building artifacts"
+restore_buildx_cache
+mkdir -p .ci-cache
+rm -rf .ci-cache/buildx-new
+sccache_env_file="$(create_sccache_env_file)"
+trap 'rm -f "${preflight_file}" "${sccache_env_file}"' EXIT
+buildx_cache_from_args=()
+if dir_has_files ".ci-cache/buildx"; then
+  buildx_cache_from_args+=(--cache-from "type=local,src=.ci-cache/buildx")
+fi
+docker buildx build \
+  --target artifacts \
+  "${buildx_cache_from_args[@]}" \
+  --secret id=sccache_env,src="${sccache_env_file}" \
+  --cache-to type=local,dest=.ci-cache/buildx-new,mode=max \
+  --output type=local,dest=build_output \
+  -f building/docker/Dockerfile .
+save_buildx_cache
+upload_release_artifacts
+
+if [[ "${run_mode}" == "build" ]]; then
+  echo "--- Preparing downstream artifacts"
+  prepare_step_artifacts
+  exit 0
+fi
+
+publish_backup_agent_image
+fi
+
+tarball_dir="build_output/packages"
+shopt -s nullglob
+tarballs=("${tarball_dir}/correctness"*.tar.gz)
+shopt -u nullglob
+
+if (( ${#tarballs[@]} )); then
+  mapfile -t tarballs < <(printf '%s\n' "${tarballs[@]}" | sort)
+  selected_tarball="${tarballs[0]}"
+  selected_tarball_basename="$(basename "${selected_tarball}")"
+
+  echo "--- Uploading correctness packages"
+  if (( ${#tarballs[@]} > 1 )); then
+    echo "Found ${#tarballs[@]} correctness tarballs; submitting only ${selected_tarball_basename}"
+  else
+    echo "Found one correctness tarball: ${selected_tarball_basename}"
+  fi
+  dest="$(resolve_dest)"
+  selected_tarball_relative_path="${selected_tarball#./}"
+  selected_tarball_url="${dest}/${selected_tarball_relative_path}"
+  echo "Uploading correctness packages to ${dest}"
+  if ! BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${dest}" \
+       buildkite-agent artifact upload "${tarballs[@]}"; then
+    echo "Failed to upload correctness packages" >&2
+    exit 1
+  fi
+  echo "--- Submitting Joshua job"
+  joshua_proxy_addr="${JOSHUA_PROXY_ADDR:-${default_joshua_proxy_addr}}"
+  joshua_runs="${JOSHUA_RUNS:-${default_joshua_runs}}"
+  joshua_commit_hash="${BUILDKITE_COMMIT:-}"
+  joshua_description="${JOSHUA_DESCRIPTION:-}"
+  joshua_pull_request="${BUILDKITE_PULL_REQUEST:-}"
+  joshua_branch_name="${BUILDKITE_BRANCH:-}"
+  joshua_build_number="${BUILDKITE_BUILD_NUMBER:-}"
+  if [[ -z "${joshua_branch_name}" ]] && command -v git >/dev/null; then
+    joshua_branch_name="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [[ "${joshua_branch_name}" == "HEAD" ]]; then
+      joshua_branch_name=""
+    fi
+  fi
+  if [[ -z "${joshua_description}" ]]; then
+    if [[ -z "${joshua_pull_request}" || "${joshua_pull_request}" == "false" ]]; then
+      echo "BUILDKITE_PULL_REQUEST unavailable; Joshua description will not include PR number"
+    fi
+    if [[ -z "${joshua_branch_name}" ]]; then
+      echo "BUILDKITE_BRANCH unavailable and git branch name could not be resolved; Joshua description will not include branch name"
+    fi
+    if [[ -z "${joshua_build_number}" ]]; then
+      echo "BUILDKITE_BUILD_NUMBER unavailable; Joshua description will not include build number"
+    fi
+    if [[ -n "${joshua_pull_request}" && "${joshua_pull_request}" != "false" && -n "${joshua_branch_name}" ]]; then
+      joshua_description="PR ${joshua_pull_request} branch ${joshua_branch_name} CI"
+    elif [[ -n "${joshua_pull_request}" && "${joshua_pull_request}" != "false" ]]; then
+      joshua_description="PR ${joshua_pull_request} CI"
+    elif [[ -n "${joshua_branch_name}" ]]; then
+      joshua_description="Branch ${joshua_branch_name} CI"
+    fi
+    if [[ -n "${joshua_description}" && -n "${joshua_build_number}" ]]; then
+      joshua_description="${joshua_description} build ${joshua_build_number}"
+    fi
+  fi
+  if [[ -z "${joshua_commit_hash}" ]] && command -v git >/dev/null; then
+    joshua_commit_hash="$(git rev-parse HEAD 2>/dev/null || true)"
+  fi
+  if ! [[ "${joshua_runs}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "JOSHUA_RUNS must be a positive integer, got: ${joshua_runs}" >&2
+    exit 1
+  fi
+  echo "Submitting tarball URL ${selected_tarball_url} to ${joshua_proxy_addr} with runs=${joshua_runs}"
+  if [[ -n "${joshua_commit_hash}" ]]; then
+    echo "Including commit hash in Joshua submission: ${joshua_commit_hash}"
+  else
+    echo "Commit hash unavailable; submitting Joshua job without commit hash metadata"
+  fi
+  if [[ -n "${joshua_description}" ]]; then
+    echo "Including Joshua submission description metadata"
+  fi
+  submit_args=(
+    python3 building/joshua_proxy/joshua_proxy_client.py
+    submit
+    --addr "${joshua_proxy_addr}"
+    --correctness-package-url "${selected_tarball_url}"
+    --runs "${joshua_runs}"
+  )
+  if [[ -n "${joshua_commit_hash}" ]]; then
+    submit_args+=(--commit-hash "${joshua_commit_hash}")
+  fi
+  if [[ -n "${joshua_description}" ]]; then
+    submit_args+=(--description "${joshua_description}")
+  fi
+  if [[ "${JOSHUA_PROXY_INSECURE:-}" == "1" ]]; then
+    submit_args+=(--insecure)
+  fi
+  if ! joshua_job_id="$("${submit_args[@]}")"; then
+    echo "Failed to submit Joshua job" >&2
+    exit 1
+  fi
+  if [[ -z "${joshua_job_id}" ]]; then
+    echo "SubmitJob response did not include job_id/jobId" >&2
+    exit 1
+  fi
+  echo "Submitted Joshua job_id=${joshua_job_id}"
+else
+  echo "No correctness tarballs found under ${tarball_dir}"
+  exit 1
+fi
