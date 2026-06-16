@@ -2753,16 +2753,28 @@ void runNetwork() {
 	}
 }
 
+static void clearClientMetrics() {
+	if (TDMetricCollection* metrics = TDMetricCollection::getTDMetrics()) {
+		metrics->metricMap.clear();
+	}
+}
+
+ACTOR static Future<Void> stopNetworkOnMainThread() {
+	ASSERT(g_network->isOnMainThread());
+	if (g_network->global(INetwork::enFlowTransport)) {
+		wait(ready(FlowTransport::transport().shutdown()));
+	}
+	closeTraceFile();
+	clearClientMetrics();
+	g_network->stop();
+	return Void();
+}
+
 void stopNetwork() {
 	if (!g_network)
 		throw network_not_setup();
 
 	TraceEvent("ClientStopNetwork").log();
-	auto clearMetrics = []() {
-		if (TDMetricCollection* metrics = TDMetricCollection::getTDMetrics()) {
-			metrics->metricMap.clear();
-		}
-	};
 
 	if (networkOptions.traceDirectory.present() && networkOptions.runLoopProfilingEnabled) {
 		stopRunLoopProfiler();
@@ -2770,11 +2782,16 @@ void stopNetwork() {
 	ThreadSafeDatabase::closeAllDatabases();
 	beginThreadSafeCleanup();
 	waitForThreadSafeCleanup();
+	// fdbcli calls stopNetwork() from this thread, where blocking on an onMainThread() task would deadlock.
+	if (g_network->isOnMainThread()) {
+		uncancellable(stopNetworkOnMainThread());
+		return;
+	}
 	if (g_network->global(INetwork::enFlowTransport)) {
 		onMainThread([]() -> Future<Void> { return FlowTransport::transport().shutdown(); }).blockUntilReady();
 	}
 	closeTraceFile();
-	clearMetrics();
+	clearClientMetrics();
 
 	g_network->stop();
 }

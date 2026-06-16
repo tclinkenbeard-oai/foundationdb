@@ -73,6 +73,22 @@ def run_fdbcli_command_and_get_error(*args):
     )
 
 
+def network_shutdown():
+    """Verify that fdbcli can stop the network from its network thread."""
+    try:
+        process = subprocess.run(
+            command_template + ["quit"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=fdbcli_env,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError("fdbcli did not exit after the quit command") from exc
+
+    assert process.returncode == 0, process.stderr.decode("utf-8").strip()
+
+
 @enable_logging()
 def advanceversion(logger):
     # get current read version
@@ -1602,6 +1618,7 @@ if __name__ == "__main__":
     ]
     # tests for fdbcli commands
     # assertions will fail if fdbcli does not work as expected
+    network_shutdown()
     test_available()
     if args.process_number == 1:
         # TODO: disable for now, the change can cause the database unavailable

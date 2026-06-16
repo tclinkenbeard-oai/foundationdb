@@ -87,6 +87,9 @@ private:
 		if (g_network->isStopped()) {
 			return true;
 		}
+		if (g_network->isOnMainThread()) {
+			return true;
+		}
 		return false;
 	}
 
