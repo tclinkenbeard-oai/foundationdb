@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <set>
 
 #include "flow/CoroUtils.h"
@@ -45,8 +46,52 @@ struct ExclusionTracker {
 		return excluded.contains(addrExclusion) || failed.contains(addrExclusion);
 	}
 
-	// Note the tracker is intended to be used by the Data Distributor. The tracker will check for excluded localities
-	// based on the server list, the server list only includes storage processes.
+	static void addLocalityExclusions(LocalityData const& locality,
+	                                  NetworkAddress const& address,
+	                                  Optional<NetworkAddress> const& secondaryAddress,
+	                                  std::vector<std::pair<std::string, std::string>> const& decodedExcludedLocalities,
+	                                  std::vector<std::pair<std::string, std::string>> const& decodedFailedLocalities,
+	                                  std::set<AddressExclusion>& excluded,
+	                                  std::set<AddressExclusion>& failed) {
+		auto addIfMatching = [&](std::vector<std::pair<std::string, std::string>> const& localities,
+		                         std::set<AddressExclusion>& addresses) {
+			if (std::none_of(localities.begin(), localities.end(), [&](auto const& excludedLocality) {
+				    auto value = locality.get(excludedLocality.first);
+				    return value.present() && value.get() == excludedLocality.second;
+			    })) {
+				return;
+			}
+
+			addresses.insert(AddressExclusion(address.ip, address.port));
+			if (secondaryAddress.present()) {
+				addresses.insert(AddressExclusion(secondaryAddress.get().ip, secondaryAddress.get().port));
+			}
+		};
+
+		addIfMatching(decodedExcludedLocalities, excluded);
+		addIfMatching(decodedFailedLocalities, failed);
+	}
+
+	static void addWorkerLocalityExclusions(
+	    std::vector<ProcessData> const& workers,
+	    std::vector<std::pair<std::string, std::string>> const& decodedExcludedLocalities,
+	    std::vector<std::pair<std::string, std::string>> const& decodedFailedLocalities,
+	    std::set<AddressExclusion>& excluded,
+	    std::set<AddressExclusion>& failed) {
+		for (auto const& worker : workers) {
+			addLocalityExclusions(worker.locality,
+			                      worker.address,
+			                      Optional<NetworkAddress>(),
+			                      decodedExcludedLocalities,
+			                      decodedFailedLocalities,
+			                      excluded,
+			                      failed);
+		}
+	}
+
+	// Locality exclusions must be resolved against both lists. The server list retains storage servers that are
+	// temporarily down, while the worker list prevents the Data Distributor from recruiting a new storage server on
+	// an excluded process after the old storage server has been removed.
 	static Future<Void> tracker(ExclusionTracker* self) {
 		// Fetch the list of excluded servers
 		ReadYourWritesTransaction tr(self->db);
@@ -62,9 +107,10 @@ struct ExclusionTracker {
 				Future<RangeResult> flocalitiesExclude = tr.getRange(excludedLocalityKeys, CLIENT_KNOBS->TOO_MANY);
 				Future<RangeResult> flocalitiesFailed = tr.getRange(failedLocalityKeys, CLIENT_KNOBS->TOO_MANY);
 				Future<RangeResult> fServerList = tr.getRange(serverListKeys, CLIENT_KNOBS->TOO_MANY);
+				Future<RangeResult> fWorkerList = tr.getRange(workerListKeys, CLIENT_KNOBS->TOO_MANY);
 
 				co_await (success(fresultsExclude) && success(fresultsFailed) && success(flocalitiesExclude) &&
-				          success(flocalitiesFailed));
+				          success(flocalitiesFailed) && success(fServerList) && success(fWorkerList));
 
 				RangeResult excludedResults = fresultsExclude.get();
 				ASSERT(!excludedResults.more && excludedResults.size() < CLIENT_KNOBS->TOO_MANY);
@@ -93,11 +139,6 @@ struct ExclusionTracker {
 					}
 				}
 
-				co_await fServerList;
-				// In some cases it can happen that the process is not running, e.g. because the process is down
-				// for maintenance. In this case the process will not be part of the worker list, but the process
-				// might be a storage server and could be part of the server list.
-				// See: https://github.com/apple/foundationdb/issues/12168
 				std::vector<std::pair<std::string, std::string>> decodedExcludedLocalities;
 				for (auto& excludedLocality : excludedLocalityResults) {
 					decodedExcludedLocalities.push_back(
@@ -109,44 +150,31 @@ struct ExclusionTracker {
 					decodedFailedLocalities.push_back(decodeLocality(decodeFailedLocalityKey(failedLocality.key)));
 				}
 
+				RangeResult workerList = fWorkerList.get();
+				ASSERT(!workerList.more && workerList.size() < CLIENT_KNOBS->TOO_MANY);
+				std::vector<ProcessData> workers;
+				workers.reserve(workerList.size());
+				for (auto const& worker : workerList) {
+					workers.push_back(decodeWorkerListValue(worker.value));
+				}
+				addWorkerLocalityExclusions(
+				    workers, decodedExcludedLocalities, decodedFailedLocalities, newExcluded, newFailed);
+
+				// A process that is down for maintenance is absent from the worker list but can still own storage.
+				// Keep resolving the same localities against the server list as well.
+				// See: https://github.com/apple/foundationdb/issues/12168
 				RangeResult serverList = fServerList.get();
+				ASSERT(!serverList.more && serverList.size() < CLIENT_KNOBS->TOO_MANY);
 				for (auto& s : serverList) {
 					auto decodedServer = decodeServerListValue(s.value);
-					// Check if the server is excluded based on a locality.
-					for (auto& excludedLocality : decodedExcludedLocalities) {
-						if (!decodedServer.locality.isPresent(excludedLocality.first)) {
-							continue;
-						}
-
-						if (decodedServer.locality.get(excludedLocality.first) != excludedLocality.second) {
-							continue;
-						}
-
-						auto addresses = decodedServer.getKeyValues.getEndpoint().addresses;
-						newExcluded.insert(AddressExclusion(addresses.address.ip, addresses.address.port));
-						if (addresses.secondaryAddress.present()) {
-							auto secondaryAddress = addresses.secondaryAddress.get();
-							newExcluded.insert(AddressExclusion(secondaryAddress.ip, secondaryAddress.port));
-						}
-					}
-
-					// Check if the server is excluded as failed based on a locality.
-					for (auto& failedLocality : decodedFailedLocalities) {
-						if (!decodedServer.locality.isPresent(failedLocality.first)) {
-							continue;
-						}
-
-						if (decodedServer.locality.get(failedLocality.first) != failedLocality.second) {
-							continue;
-						}
-
-						auto addresses = decodedServer.getKeyValues.getEndpoint().addresses;
-						newFailed.insert(AddressExclusion(addresses.address.ip, addresses.address.port));
-						if (addresses.secondaryAddress.present()) {
-							auto secondaryAddress = addresses.secondaryAddress.get();
-							newFailed.insert(AddressExclusion(secondaryAddress.ip, secondaryAddress.port));
-						}
-					}
+					auto addresses = decodedServer.getKeyValues.getEndpoint().addresses;
+					addLocalityExclusions(decodedServer.locality,
+					                      addresses.address,
+					                      addresses.secondaryAddress,
+					                      decodedExcludedLocalities,
+					                      decodedFailedLocalities,
+					                      newExcluded,
+					                      newFailed);
 				}
 
 				bool foundChange = false;

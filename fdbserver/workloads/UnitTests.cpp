@@ -52,6 +52,7 @@ void forceLinkLogSystemRecoveryTests();
 void forceLinkIPagerTests();
 void forceLinkMockS3ServerTests();
 void forceLinkAuditUtilsTests();
+void forceLinkExclusionTrackerTests();
 void forceLinkClusterHealthMonitorTests();
 void forceLinkGrvQueueDelayTests();
 // TODO akanksha: Remove once a production caller of backupWorkerRangePartitioned() is wired up;
@@ -128,6 +129,7 @@ struct UnitTestWorkload : TestWorkload {
 		forceLinkIPagerTests();
 		forceLinkMockS3ServerTests();
 		forceLinkAuditUtilsTests();
+		forceLinkExclusionTrackerTests();
 		forceLinkClusterHealthMonitorTests();
 		forceLinkGrvQueueDelayTests();
 		// TODO akanksha: Remove once a production caller of backupWorkerRangePartitioned() is wired up;
