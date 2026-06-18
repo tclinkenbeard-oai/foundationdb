@@ -7,6 +7,7 @@ tenantModes=['disabled']
 [[test]]
 testTitle="SnapTestPre"
 clearAfterTest=false
+disabledFailureInjectionWorkloads='Attrition'
 
         [[test.workload]]
         testName="SnapTest"
@@ -17,6 +18,7 @@ clearAfterTest=false
 [[test]]
 testTitle="SnapTestTakeSnap"
 clearAfterTest=false
+disabledFailureInjectionWorkloads='Attrition'
 
         [[test.workload]]
         testName="ReadWrite"
@@ -44,6 +46,7 @@ clearAfterTest=false
 [[test]]
 testTitle="SnapTestPost"
 clearAfterTest=false
+disabledFailureInjectionWorkloads='Attrition'
 
         [[test.workload]]
         testName="SnapTest"
