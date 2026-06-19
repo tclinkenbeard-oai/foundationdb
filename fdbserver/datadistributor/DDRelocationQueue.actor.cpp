@@ -1473,6 +1473,10 @@ Future<Void> dataDistributionRelocator(DDQueue* self,
 	PromiseStream<RelocateData> dataTransferComplete(self->dataTransferComplete);
 	PromiseStream<RelocateData> relocationComplete(self->relocationComplete);
 	bool signalledTransferComplete = false;
+	// A relocator can retry after moveKeys exceeds its retry limit. The source-transfer completion signal is shared
+	// across those attempts, but each attempt registers new destination work. Track whether this actor still owns
+	// that attempt's destination cleanup or transferred it to DDQueue::complete() with dataTransferComplete.
+	bool ownsDestBusyness = false;
 	UID distributorId = self->distributorId;
 	ParallelTCInfo healthyDestinations;
 
@@ -2083,7 +2087,9 @@ Future<Void> dataDistributionRelocator(DDQueue* self,
 
 			// At this point, we are about to launch the data move, so we should update the busy map counter
 			// for destination servers.
+			ASSERT(!ownsDestBusyness);
 			launchDest(rd, bestTeams, self->destBusymap);
+			ownsDestBusyness = true;
 			if (doBulkLoading) {
 				for (const auto& [team, _] : bestTeams) {
 					for (const UID& ssid : team->getServerIDs()) {
@@ -2204,6 +2210,7 @@ Future<Void> dataDistributionRelocator(DDQueue* self,
 							if (!signalledTransferComplete) {
 								signalledTransferComplete = true;
 								self->dataTransferComplete.send(rd);
+								ownsDestBusyness = false;
 							}
 						}
 						pollHealth = signalledTransferComplete
@@ -2214,6 +2221,7 @@ Future<Void> dataDistributionRelocator(DDQueue* self,
 						if (!signalledTransferComplete) {
 							signalledTransferComplete = true;
 							self->dataTransferComplete.send(rd);
+							ownsDestBusyness = false;
 						}
 					} else {
 						UNREACHABLE();
@@ -2277,6 +2285,10 @@ Future<Void> dataDistributionRelocator(DDQueue* self,
 					if (!signalledTransferComplete) {
 						signalledTransferComplete = true;
 						dataTransferComplete.send(rd);
+						ownsDestBusyness = false;
+					} else if (ownsDestBusyness) {
+						completeDest(rd, self->destBusymap);
+						ownsDestBusyness = false;
 					}
 
 					// In the case of merge, rd.completeSources would be the intersection set of two source server
@@ -2351,10 +2363,9 @@ Future<Void> dataDistributionRelocator(DDQueue* self,
 				    trigger([destinationRef, readLoad]() mutable { destinationRef.addReadInFlightToTeam(-readLoad); },
 				            delay(SERVER_KNOBS->STORAGE_METRICS_AVERAGE_INTERVAL)));
 
-				if (!signalledTransferComplete) {
-					// signalling transferComplete calls completeDest() in complete(), so doing so here would
-					// double-complete the work
+				if (ownsDestBusyness) {
 					completeDest(rd, self->destBusymap);
+					ownsDestBusyness = false;
 				}
 				rd.completeDests.clear();
 
@@ -2385,8 +2396,13 @@ Future<Void> dataDistributionRelocator(DDQueue* self,
 		    .detail("Dest", describe(destIds))
 		    .detail("Src", describe(rd.src));
 	}
-	if (!signalledTransferComplete)
+	if (!signalledTransferComplete) {
 		dataTransferComplete.send(rd);
+		ownsDestBusyness = false;
+	} else if (ownsDestBusyness) {
+		completeDest(rd, self->destBusymap);
+		ownsDestBusyness = false;
+	}
 
 	relocationComplete.send(rd);
 
