@@ -2568,8 +2568,10 @@ Future<Void> initPersistentState(TLogData* self, Reference<LogData> logData) {
 	co_await self->persistentData->commit();
 }
 
-// send stopped promise instead of LogData* to avoid reference cycles
-Future<Void> rejoinClusterController(TLogData* self,
+// Pass independently owned state instead of TLogData* or LogData* so this coroutine cannot outlive either object.
+Future<Void> rejoinClusterController(Reference<AsyncVar<ServerDBInfo> const> dbInfo,
+                                     UID tlogDataId,
+                                     Future<Void> terminated,
                                      TLogInterface tli,
                                      DBRecoveryCount recoveryCount,
                                      Promise<Void> stoppedPromise,
@@ -2577,7 +2579,11 @@ Future<Void> rejoinClusterController(TLogData* self,
                                      bool isPrimary) {
 	LifetimeToken lastMasterLifetime;
 	while (true) {
-		auto const& inf = self->dbInfo->get();
+		if (terminated.isReady()) {
+			co_return;
+		}
+
+		auto const& inf = dbInfo->get();
 		bool isDisplaced =
 		    std::find(inf.priorCommittedLogServers.begin(), inf.priorCommittedLogServers.end(), tli.id()) ==
 		    inf.priorCommittedLogServers.end();
@@ -2604,41 +2610,43 @@ Future<Void> rejoinClusterController(TLogData* self,
 			throw worker_removed();
 		} else if (inf.recoveryCount > recoveryCount && stoppedPromise.canBeSet()) {
 			CODE_PROBE(true, "Stopping tlog because new dbinfo has a higher recovery count");
-			TraceEvent("StoppingTLog", self->dbgid)
+			TraceEvent("StoppingTLog", tlogDataId)
 			    .detail("LogId", tli.id())
 			    .detail("NewRecoveryCount", inf.recoveryCount)
 			    .detail("MyRecoveryCount", recoveryCount);
 			stoppedPromise.send(Void());
 		}
 
-		if (self->terminated.isSet()) {
-			co_return;
-		}
-
 		if (registerWithCC.isReady()) {
-			if (!lastMasterLifetime.isEqual(self->dbInfo->get().masterLifetime)) {
+			if (!lastMasterLifetime.isEqual(dbInfo->get().masterLifetime)) {
 				// The TLogRejoinRequest is needed to establish communications with a new master, which doesn't have our
 				// TLogInterface
 				TLogRejoinRequest req(tli);
 				TraceEvent("TLogRejoining", tli.id())
-				    .detail("ClusterController", self->dbInfo->get().clusterInterface.id())
-				    .detail("DbInfoMasterLifeTime", self->dbInfo->get().masterLifetime.toString())
+				    .detail("ClusterController", dbInfo->get().clusterInterface.id())
+				    .detail("DbInfoMasterLifeTime", dbInfo->get().masterLifetime.toString())
 				    .detail("LastMasterLifeTime", lastMasterLifetime.toString());
-				auto res =
-				    co_await race(brokenPromiseToNever(self->dbInfo->get().clusterInterface.tlogRejoin.getReply(req)),
-				                  self->dbInfo->onChange());
+				auto res = co_await race(brokenPromiseToNever(dbInfo->get().clusterInterface.tlogRejoin.getReply(req)),
+				                         dbInfo->onChange(),
+				                         terminated);
 				if (res.index() == 0) {
 					TLogRejoinReply rep = std::get<0>(res);
 					if (rep.masterIsRecovered)
-						lastMasterLifetime = self->dbInfo->get().masterLifetime;
-				} else {
-					ASSERT(res.index() == 1);
+						lastMasterLifetime = dbInfo->get().masterLifetime;
+				} else if (res.index() == 2) {
+					co_return;
 				}
 			} else {
-				co_await self->dbInfo->onChange();
+				auto res = co_await race(dbInfo->onChange(), terminated);
+				if (res.index() == 1) {
+					co_return;
+				}
 			}
 		} else {
-			co_await (registerWithCC || self->dbInfo->onChange());
+			auto res = co_await race(registerWithCC, dbInfo->onChange(), terminated);
+			if (res.index() == 2) {
+				co_return;
+			}
 		}
 	}
 }
@@ -3479,8 +3487,14 @@ Future<Void> restorePersistentState(TLogData* self,
 		logData->version.set(ver);
 		logData->recoveryCount =
 		    BinaryReader::fromStringRef<DBRecoveryCount>(fRecoverCounts.get()[idx].value, Unversioned());
-		logData->removed = rejoinClusterController(
-		    self, recruited, logData->recoveryCount, logData->stoppedPromise, registerWithCC.getFuture(), false);
+		logData->removed = rejoinClusterController(self->dbInfo,
+		                                           self->dbgid,
+		                                           self->terminated.getFuture(),
+		                                           recruited,
+		                                           logData->recoveryCount,
+		                                           logData->stoppedPromise,
+		                                           registerWithCC.getFuture(),
+		                                           false);
 		removed.push_back(errorOr(logData->removed));
 		logsByVersion.emplace_back(ver, id1);
 
@@ -3732,8 +3746,14 @@ Future<Void> tLogStart(TLogData* self, InitializeTLogRequest req, LocalityData l
 	logData->locality = req.locality;
 	logData->recoveryCount = req.epoch;
 	logData->recoveryTxnVersion = req.recoveryTransactionVersion;
-	logData->removed = rejoinClusterController(
-	    self, recruited, req.epoch, logData->stoppedPromise, Future<Void>(Void()), req.isPrimary);
+	logData->removed = rejoinClusterController(self->dbInfo,
+	                                           self->dbgid,
+	                                           self->terminated.getFuture(),
+	                                           recruited,
+	                                           req.epoch,
+	                                           logData->stoppedPromise,
+	                                           Future<Void>(Void()),
+	                                           req.isPrimary);
 	self->popOrder.push_back(recruited.id());
 	self->spillOrder.push_back(recruited.id());
 
@@ -4006,6 +4026,24 @@ Future<Void> tLog(IKeyValueStore* persistentData,
 }
 
 // UNIT TESTS
+TEST_CASE("/fdbserver/tlogserver/RejoinClusterControllerStopsOnSharedTLogTermination") {
+	auto dbInfo = makeReference<AsyncVar<ServerDBInfo>>(ServerDBInfo());
+	Promise<Void> terminated;
+	Future<Void> rejoin = rejoinClusterController(dbInfo,
+	                                              UID(1, 1),
+	                                              terminated.getFuture(),
+	                                              TLogInterface(UID(2, 2), UID(1, 1), LocalityData()),
+	                                              dbInfo->get().recoveryCount,
+	                                              Promise<Void>(),
+	                                              Future<Void>(Void()),
+	                                              false);
+
+	ASSERT(!rejoin.isReady());
+	terminated.send(Void());
+	co_await rejoin;
+	co_return;
+}
+
 struct DequeAllocatorStats {
 	static int64_t allocatedBytes;
 };
