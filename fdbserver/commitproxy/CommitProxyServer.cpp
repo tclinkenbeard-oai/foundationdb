@@ -48,6 +48,7 @@
 #include "fdbserver/kvstore/FDBExecHelper.h"
 #include "fdbserver/logsystem/LogSystemFactory.h"
 #include "fdbserver/logsystem/LogSystemDiskQueueAdapter.h"
+#include "fdbserver/logsystem/TxnStateStoreRecovery.h"
 #include "fdbserver/core/MasterInterface.h"
 #include "fdbserver/core/MutationTracking.h"
 #include "ProxyCommitData.h"
@@ -2642,109 +2643,30 @@ public:
 	Future<Void> run() { co_await race(receiveExpireRequests(), receiveExpectedCounts(), purgeOldEntries()); }
 };
 
-struct TransactionStateResolveContext {
-	// Maximum sequence for txnStateRequest, this is defined when the request last flag is set.
-	Sequence maxSequence = std::numeric_limits<Sequence>::max();
+class CommitProxyTxnStateStoreReplayContext final : public TxnStateStoreReplayContext {
+public:
+	explicit CommitProxyTxnStateStoreReplayContext(ProxyCommitData* commitData)
+	  : TxnStateStoreReplayContext(commitData->txnStateStore, &commitData->storageCache, &commitData->keyInfo),
+	    commitData(commitData) {}
 
-	// Flags marks received transaction state requests, we only process the transaction request when *all* requests are
-	// received.
-	std::unordered_set<Sequence> receivedSequences;
-
-	ProxyCommitData* pCommitData = nullptr;
-
-	// Pointer to transaction state store, shortcut for commitData.txnStateStore
-	IKeyValueStore* pTxnStateStore = nullptr;
-
-	Future<Void> txnRecovery;
-
-	// Actor streams
-	PromiseStream<Future<Void>>* pActors = nullptr;
-
-	// Flag reports if the transaction state request is complete. This request should only happen during recover, i.e.
-	// once per commit proxy.
-	bool processed = false;
-
-	TransactionStateResolveContext() = default;
-
-	TransactionStateResolveContext(ProxyCommitData* pCommitData_, PromiseStream<Future<Void>>* pActors_)
-	  : pCommitData(pCommitData_), pTxnStateStore(pCommitData_->txnStateStore), pActors(pActors_) {
-		ASSERT(pTxnStateStore != nullptr);
-	}
-};
-
-Future<Void> processCompleteTransactionStateRequest(TransactionStateResolveContext* pContext) {
-	KeyRange txnKeys = allKeys;
-	std::map<Tag, UID> tag_uid;
-
-	RangeResult UIDtoTagMap = pContext->pTxnStateStore->readRange(serverTagKeys).get();
-	for (const KeyValueRef& kv : UIDtoTagMap) {
-		tag_uid[decodeServerTagValue(kv.value)] = decodeServerTagKey(kv.key);
-	}
-
-	while (true) {
-		co_await yield();
-
-		RangeResult data =
-		    pContext->pTxnStateStore
-		        ->readRange(txnKeys, SERVER_KNOBS->BUGGIFIED_ROW_LIMIT, SERVER_KNOBS->APPLY_MUTATION_BYTES)
-		        .get();
-		if (data.empty())
-			break;
-
-		((KeyRangeRef&)txnKeys) = KeyRangeRef(keyAfter(data.back().key, txnKeys.arena()), txnKeys.end);
-
-		Standalone<VectorRef<MutationRef>> mutations;
-		std::vector<std::pair<MapPair<Key, ServerCacheInfo>, int>> keyInfoData;
-		std::vector<UID> src, dest;
-		ServerCacheInfo info;
-		auto updateTagInfo = [pContext = pContext](const std::vector<UID>& uids,
-		                                           std::vector<Tag>& tags,
-		                                           std::vector<Reference<StorageInfo>>& storageInfoItems) {
-			for (const auto& id : uids) {
-				auto storageInfo = getStorageInfo(id, &pContext->pCommitData->storageCache, pContext->pTxnStateStore);
-				ASSERT(storageInfo->tag != invalidTag);
-				tags.push_back(storageInfo->tag);
-				storageInfoItems.push_back(storageInfo);
-			}
-		};
-		for (auto& kv : data) {
-			if (kv.key.startsWith(keyServersPrefix)) {
-				KeyRef k = kv.key.removePrefix(keyServersPrefix);
-				if (k == allKeys.end) {
-					continue;
-				}
-				decodeKeyServersValue(tag_uid, kv.value, src, dest);
-
-				info.tags.clear();
-
-				info.src_info.clear();
-				updateTagInfo(src, info.tags, info.src_info);
-
-				info.dest_info.clear();
-				updateTagInfo(dest, info.tags, info.dest_info);
-
-				uniquify(info.tags);
-				keyInfoData.emplace_back(MapPair<Key, ServerCacheInfo>(k, info), 1);
-			} else if (kv.key.startsWith(rangeLockPrefix)) {
-				if (pContext->pCommitData->rangeLockEnabled()) {
-					ASSERT(pContext->pCommitData->rangeLock != nullptr);
-					Key keyInsert = kv.key.removePrefix(rangeLockPrefix);
-					pContext->pCommitData->rangeLock->initKeyPoint(keyInsert, kv.value);
-				}
-			} else {
-				mutations.emplace_back(mutations.arena(), MutationRef::SetValue, kv.key, kv.value);
-				continue;
-			}
+	bool consumeNonKeyServersKeyValue(const KeyValueRef& kv) override {
+		if (!kv.key.startsWith(rangeLockPrefix)) {
+			return false;
 		}
 
-		// insert keyTag data separately from metadata mutations so that we can do one bulk insert which
-		// avoids a lot of map lookups.
-		pContext->pCommitData->keyInfo.rawInsert(keyInfoData);
+		if (commitData->rangeLockEnabled()) {
+			ASSERT(commitData->rangeLock != nullptr);
+			Key keyInsert = kv.key.removePrefix(rangeLockPrefix);
+			commitData->rangeLock->initKeyPoint(keyInsert, kv.value);
+		}
+		return true;
+	}
 
+	void applyMetadataBatch(const VectorRef<MutationRef>& mutations) override {
 		Arena arena;
 		bool confChanges;
 		applyMetadataMutations(SpanContext(),
-		                       pContext->pCommitData->getApplyMetadataProxyContext(),
+		                       commitData->getApplyMetadataProxyContext(),
 		                       arena,
 		                       Reference<LogSystemConsumer>(),
 		                       mutations,
@@ -2753,56 +2675,47 @@ Future<Void> processCompleteTransactionStateRequest(TransactionStateResolveConte
 		                       /* version= */ 0,
 		                       /* popVersion= */ 0,
 		                       /* initialCommit= */ true,
-		                       /* provisionalCommitProxy */ pContext->pCommitData->provisional);
+		                       /* provisionalCommitProxy */ commitData->provisional);
 	}
 
-	auto lockedKey = pContext->pTxnStateStore->readValue(databaseLockedKey).get();
-	pContext->pCommitData->locked = lockedKey.present() && !lockedKey.get().empty();
-	pContext->pCommitData->metadataVersion = pContext->pTxnStateStore->readValue(metadataVersionKey).get();
+	void finishReplay() override {
+		auto lockedKey = getTxnStateStore()->readValue(databaseLockedKey).get();
+		commitData->locked = lockedKey.present() && !lockedKey.get().empty();
+		commitData->metadataVersion = getTxnStateStore()->readValue(metadataVersionKey).get();
+	}
 
-	pContext->pTxnStateStore->enableSnapshot();
+private:
+	ProxyCommitData* commitData;
+};
+
+struct TransactionStateResolveContext {
+	ProxyCommitData* pCommitData = nullptr;
+	TxnStateRequestAccumulator requestAccumulator;
+
+	TransactionStateResolveContext() = default;
+
+	TransactionStateResolveContext(ProxyCommitData* pCommitData_, PromiseStream<Future<Void>>* pActors_)
+	  : pCommitData(pCommitData_), requestAccumulator(pCommitData_->txnStateStore, pActors_) {
+		ASSERT(pCommitData_->txnStateStore != nullptr);
+	}
+};
+
+Future<Void> processCompleteTransactionStateRequest(TransactionStateResolveContext* pContext) {
+	CommitProxyTxnStateStoreReplayContext replayContext(pContext->pCommitData);
+	co_await replayTxnStateStore(replayContext);
 }
 
 Future<Void> processTransactionStateRequestPart(TransactionStateResolveContext* pContext, TxnStateRequest request) {
 	ASSERT(pContext->pCommitData != nullptr);
-	ASSERT(pContext->pActors != nullptr);
-
-	if (pContext->receivedSequences.contains(request.sequence)) {
-		if (pContext->receivedSequences.size() == pContext->maxSequence) {
-			co_await pContext->txnRecovery;
-		}
-		// This part is already received. Still we will re-broadcast it to other CommitProxies
-		pContext->pActors->send(broadcastTxnRequest(request, SERVER_KNOBS->TXN_STATE_SEND_AMOUNT, true));
-		co_await yield();
-		co_return;
-	}
-
-	if (request.last) {
-		// This is the last piece of subsequence, yet other pieces might still on the way.
-		pContext->maxSequence = request.sequence + 1;
-	}
-	pContext->receivedSequences.insert(request.sequence);
 
 	// Although we may receive the CommitTransactionRequest for the recovery transaction before all of the
 	// TxnStateRequest, we will not get a resolution result from any resolver until the master has submitted its initial
 	// (sequence 0) resolution request, which it doesn't do until we have acknowledged all TxnStateRequests
-	ASSERT(!pContext->pCommitData->validState.isSet());
-
-	for (auto& kv : request.data) {
-		pContext->pTxnStateStore->set(kv, &request.arena);
-	}
-	pContext->pTxnStateStore->commit(true);
-
-	if (pContext->receivedSequences.size() == pContext->maxSequence) {
-		// Received all components of the txnStateRequest
-		ASSERT(!pContext->processed);
-		pContext->txnRecovery = processCompleteTransactionStateRequest(pContext);
-		co_await pContext->txnRecovery;
-		pContext->processed = true;
-	}
-
-	pContext->pActors->send(broadcastTxnRequest(request, SERVER_KNOBS->TXN_STATE_SEND_AMOUNT, true));
-	co_await yield();
+	co_await pContext->requestAccumulator.processRequestPart(
+	    request,
+	    [pContext]() { return processCompleteTransactionStateRequest(pContext); },
+	    [pContext]() { ASSERT(!pContext->pCommitData->validState.isSet()); },
+	    /* waitForCompletionOnDuplicate= */ true);
 }
 
 } // anonymous namespace
