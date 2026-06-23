@@ -28,6 +28,7 @@
 #include "fdbclient/GrvProxyInterface.h"
 #include "fdbclient/VersionVector.h"
 #include "fdbserver/GrvProxyTagThrottler.h"
+#include "fdbserver/GrvProxyStarvation.h"
 #include "fdbserver/GrvTransactionRateInfo.h"
 #include "fdbserver/LogSystem.h"
 #include "fdbserver/LogSystemDiskQueueAdapter.h"
@@ -846,6 +847,35 @@ ACTOR Future<Void> monitorDDMetricsChanges(int64_t* midShardSize, Reference<Asyn
 	}
 }
 
+ACTOR static Future<Void> grvProxyProgressCanary(Reference<GrvProxyStarvationDetector> starvationDetector) {
+	loop {
+		// Run below every priority needed to release and complete a GRV. If this canary runs, the GRV path is not
+		// being starved by higher-priority work.
+		wait(delay(SERVER_KNOBS->GRV_PROXY_PROGRESS_CHECK_INTERVAL, TaskPriority::GetLiveCommittedVersion));
+		// Simulation does not schedule by priority. Occasionally skip this lower-priority progress signal so a rare
+		// run of consecutive skips simulates CPU starvation and exercises the watchdog.
+		if (!BUGGIFY) {
+			starvationDetector->recordProgress();
+		}
+	}
+}
+
+ACTOR static Future<Void> grvProxyStarvationWatchdog(UID proxyId,
+                                                     Reference<GrvProxyStarvationDetector> starvationDetector) {
+	loop {
+		// Flow transport pings run at ReadSocket. If this check runs while the lower-priority canary does not,
+		// the process still looks healthy to transport but cannot make GRV progress.
+		wait(delay(SERVER_KNOBS->GRV_PROXY_PROGRESS_CHECK_INTERVAL, TaskPriority::ReadSocket));
+		if (starvationDetector->checkForStarvation()) {
+			TraceEvent(SevWarnAlways, "GrvProxyCpuStarved", proxyId)
+			    .detail("ConsecutiveMissedProgressChecks", starvationDetector->getConsecutiveMisses())
+			    .detail("ProgressCheckInterval", SERVER_KNOBS->GRV_PROXY_PROGRESS_CHECK_INTERVAL)
+			    .detail("ProgressPriority", static_cast<int>(TaskPriority::GetLiveCommittedVersion));
+			throw failed_to_progress();
+		}
+	}
+}
+
 ACTOR static Future<Void> transactionStarter(GrvProxyInterface proxy,
                                              Reference<AsyncVar<ServerDBInfo> const> db,
                                              PromiseStream<Future<Void>> addActor,
@@ -1124,6 +1154,12 @@ ACTOR Future<Void> grvProxyServerCore(GrvProxyInterface proxy,
 	grvProxyData.logSystem = ILogSystem::fromServerDBInfo(proxy.id(), grvProxyData.db->get(), false, addActor);
 
 	grvProxyData.updateLatencyBandConfig(grvProxyData.db->get().latencyBandConfig);
+	// Start before transactionStarter waits to observe this proxy in dbInfo. The interface can already be visible to
+	// clients at that point, so waiting for GrvProxyReadyForTxnStarts would leave a startup starvation window.
+	Reference<GrvProxyStarvationDetector> starvationDetector =
+	    makeReference<GrvProxyStarvationDetector>(SERVER_KNOBS->GRV_PROXY_MAX_MISSED_PROGRESS_CHECKS);
+	addActor.send(grvProxyProgressCanary(starvationDetector));
+	addActor.send(grvProxyStarvationWatchdog(proxy.id(), starvationDetector));
 
 	addActor.send(transactionStarter(
 	    proxy, grvProxyData.db, addActor, &grvProxyData, &healthMetricsReply, &detailedHealthMetricsReply));
@@ -1169,15 +1205,17 @@ ACTOR Future<Void> grvProxyServer(GrvProxyInterface proxy,
 		state Future<Void> core = grvProxyServerCore(proxy, req.master, req.masterLifetime, db);
 		wait(core || checkRemoved(db, req.recoveryCount, proxy));
 	} catch (Error& e) {
-		TraceEvent("GrvProxyTerminated", proxy.id()).errorUnsuppressed(e);
+		Severity sev = e.code() == error_code_failed_to_progress ? SevWarnAlways : SevInfo;
+		TraceEvent(sev, "GrvProxyTerminated", proxy.id()).errorUnsuppressed(e);
 		ASSERT(e.code() !=
 		       error_code_broken_promise); // all broken_promise should be transformed to the correct error code
 		CODE_PROBE(e.code() == error_code_master_failed, "GrvProxyServer master failed");
 		CODE_PROBE(e.code() == error_code_tlog_failed, "GrvProxyServer tlog failed");
+		CODE_PROBE(e.code() == error_code_failed_to_progress, "GRV proxy failed to progress");
 		if (e.code() != error_code_worker_removed && e.code() != error_code_tlog_stopped &&
 		    e.code() != error_code_tlog_failed && e.code() != error_code_coordinators_changed &&
 		    e.code() != error_code_coordinated_state_conflict && e.code() != error_code_new_coordinators_timed_out &&
-		    e.code() != error_code_master_failed) {
+		    e.code() != error_code_master_failed && e.code() != error_code_failed_to_progress) {
 			throw;
 		}
 	}
