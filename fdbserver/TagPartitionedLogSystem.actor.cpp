@@ -3108,6 +3108,29 @@ ACTOR Future<Reference<ILogSystem>> TagPartitionedLogSystem::newEpoch(
 		logSystem->expectedLogSets++;
 	}
 
+	// Backup workers are bound to the recovery that recruited them and self-displace when the recovery count
+	// advances. Do not carry their interfaces into this recovery: the master re-recruits any unfinished work from
+	// durable progress, and monitoring an inherited interface would turn expected displacement into
+	// backup_worker_failed.
+	{
+		size_t droppedBackupWorkers = 0;
+		for (const auto& logSet : oldLogSystem->tLogs) {
+			droppedBackupWorkers += logSet->backupWorkers.size();
+			logSet->backupWorkers.clear();
+		}
+		for (const auto& old : oldLogSystem->oldLogData) {
+			for (const auto& logSet : old.tLogs) {
+				droppedBackupWorkers += logSet->backupWorkers.size();
+				logSet->backupWorkers.clear();
+			}
+		}
+		if (droppedBackupWorkers > 0) {
+			TraceEvent("DropPreviousRecoveryBackupWorkers", logSystem->dbgid)
+			    .detail("RecoveryCount", recoveryCount)
+			    .detail("Count", droppedBackupWorkers);
+		}
+	}
+
 	if (oldLogSystem->tLogs.size()) {
 		logSystem->oldLogData.emplace_back();
 		logSystem->oldLogData[0].tLogs = oldLogSystem->tLogs;
