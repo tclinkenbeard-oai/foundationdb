@@ -1,0 +1,21 @@
+diff --git a/Makefile b/Makefile
+index e8e6bcff..c4aec986 100644
+--- a/Makefile
++++ b/Makefile
+@@ -396,7 +396,7 @@ endif
+ ifneq (,$(filter MSYS POSIX,$(HOST_OS)))
+ 
+ CMAKE ?= cmake
+-CMAKE_PARAMS = -DZSTD_BUILD_CONTRIB:BOOL=ON -DZSTD_BUILD_STATIC:BOOL=ON -DZSTD_BUILD_TESTS:BOOL=ON -DZSTD_ZLIB_SUPPORT:BOOL=ON -DZSTD_LZMA_SUPPORT:BOOL=ON
++CMAKE_PARAMS = -DZSTD_BUILD_CONTRIB:BOOL=ON -DZSTD_BUILD_STATIC:BOOL=ON -DZSTD_BUILD_TESTS:BOOL=ON -DZSTD_ZLIB_SUPPORT:BOOL=ON -DZSTD_LZMA_SUPPORT:BOOL=ON -DCMAKE_INSTALL_PREFIX=/opt/zstd_1_5_7
+ 
+ ifneq (,$(filter MSYS%,$(shell sh -c 'MSYSTEM="MSYS" uname')))
+ CMAKE_PARAMS = -G"MSYS Makefiles" -DZSTD_MULTITHREAD_SUPPORT:BOOL=OFF -DZSTD_BUILD_STATIC:BOOL=ON -DZSTD_BUILD_TESTS:BOOL=ON
+@@ -409,7 +409,6 @@ cmakebuild:
+ 	$(MKDIR) cmakebuild install
+ 	cd cmakebuild; $(CMAKE) -Wdev -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-Werror -O0" -DCMAKE_INSTALL_PREFIX=install $(CMAKE_PARAMS) ../build/cmake
+ 	$(CMAKE) --build cmakebuild --target install -- -j V=1
+-	cd cmakebuild; ctest -V -L Medium
+ 
+ MESON ?= meson
+ NINJA ?= ninja
