@@ -266,6 +266,12 @@ publish_backup_agent_image() {
   if [[ -z "${FDB_RELEASE_BLOB_VERSION:-}" ]]; then
     echo "FDB_RELEASE_BLOB_VERSION not set; building backup_agent image locally without publishing"
     FDB_BACKUP_AGENT_IMAGE_PUSH=0
+    # Unpublished branches do not have a release image yet. Reuse the known
+    # compatibility image while preserving project_version() below for the
+    # injected branch library's versioned name.
+    if [[ -z "${base_image}" ]]; then
+      base_image="${base_repository}:${extra_library_version}"
+    fi
   fi
 
   release_version="$(sanitize_path_component "${release_version}")"
