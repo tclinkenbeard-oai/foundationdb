@@ -4,11 +4,15 @@ FROM openaiapibase.azurecr.io/mirror/foundationdb/rockylinux9-latest@sha256:27e8
 
 
 ARG ENABLE_PYTHON_AC=0
+ARG SCCACHE_VERSION=0.15.0
 
 ENV ENABLE_PYTHON_AC=${ENABLE_PYTHON_AC}
 
-RUN dnf -y install ccache && \
-    dnf clean all
+RUN curl -fsSL \
+      https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz \
+      -o /tmp/sccache.tar.gz && \
+    tar -xzf /tmp/sccache.tar.gz --strip-components=1 -C /usr/local/bin && \
+    rm -f /tmp/sccache.tar.gz
 
 COPY building/docker/patches /patches
 RUN curl -L https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz -o /tmp/zstd-1.5.7.tar.gz && \
@@ -22,14 +26,18 @@ FROM base AS buildfdb
 # Note we put the build output inside the mounted source because otherwise I/O perf are terrible it
 # seems but we will need to store it somewhere at the end of this RUN otherwise it will be lost ...
 RUN --mount=type=bind,target=/src/fdb,rw \
-    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/sccache \
+    --mount=type=secret,id=sccache_env \
     mkdir -p /src/fdb/build_output && \
     rm -rf /src/fdb/build_output/* && \
     cd /src/fdb && \
-    CCACHE_DIR=/root/.cache/ccache \
+    while IFS='=' read -r key value; do \
+        [ -n "${key}" ] && export "${key}=${value}"; \
+    done < /run/secrets/sccache_env && \
+    SCCACHE_DIR=/root/.cache/sccache \
     CC=clang CXX=clang++ LD=lld cmake \
-        -D CMAKE_C_COMPILER_LAUNCHER=ccache \
-        -D CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+        -D CMAKE_C_COMPILER_LAUNCHER=sccache \
+        -D CMAKE_CXX_COMPILER_LAUNCHER=sccache \
         -D USE_LD=LLD -D USE_LIBCXX=1 -D USE_PYTHON_AC=$ENABLE_PYTHON_AC \
         -D FULL_DEBUG_SYMBOLS=ON \
         -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
@@ -38,7 +46,7 @@ RUN --mount=type=bind,target=/src/fdb,rw \
     ninja -j20 && \
     ninja -j20 strip_fdbserver strip_fdbbackup strip_fdbcli strip_fdbmonitor && \
     ninja -j20 bindings/python/python_binding && \
-    ccache -s && \
+    ( SCCACHE_DIR=/root/.cache/sccache sccache --show-stats || true ) && \
     mkdir -p /out && \
     cp -a /src/fdb/build_output/packages /out/
 
