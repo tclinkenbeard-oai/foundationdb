@@ -5,15 +5,7 @@ steps:
       queue: "applied-bk-agent-fdb"
     command: "bash building/buildkite/general_build.sh"
     artifact_paths:
-      - ".buildkite-artifacts/backup-agent-image-inputs.tar.gz"
       - ".buildkite-artifacts/correctness.tar.gz"
-
-  - label: ":docker: Build backup-agent image"
-    key: "build-backup-agent-image"
-    agents:
-      queue: "applied-bk-agent-fdb"
-    depends_on: "general-build"
-    command: "bash building/buildkite/build_backup_agent_image.sh"
 
   - label: ":test_tube: Submit Joshua job"
     key: "submit-joshua"

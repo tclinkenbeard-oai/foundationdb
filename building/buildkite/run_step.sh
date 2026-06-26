@@ -12,7 +12,6 @@ readonly default_storage_account="appliedciblobdata"
 readonly default_blob_container="fdb-ci-artifacts"
 readonly build_step_key="general-build"
 readonly step_artifact_dir=".buildkite-artifacts"
-readonly backup_agent_inputs_artifact="${step_artifact_dir}/backup-agent-image-inputs.tar.gz"
 readonly correctness_artifact="${step_artifact_dir}/correctness.tar.gz"
 
 
@@ -201,181 +200,6 @@ upload_release_artifacts() {
   )
 }
 
-project_version() {
-  sed -n 's/^[[:space:]]*VERSION \([^[:space:]]*\).*/\1/p' CMakeLists.txt | head -n 1
-}
-
-minor_version() {
-  local version="${1}"
-  local major
-  local minor
-
-  IFS=. read -r major minor _ <<< "${version}"
-  if [[ -z "${major}" || -z "${minor}" ]]; then
-    return 1
-  fi
-  echo "${major}.${minor}"
-}
-
-acr_name_from_image() {
-  local image="${1}"
-  local registry="${image%%/*}"
-
-  if [[ "${registry}" == *.azurecr.io ]]; then
-    echo "${registry%.azurecr.io}"
-  fi
-}
-
-login_to_acr_registries() {
-  local logged_in=" "
-  local image
-  local acr_name
-
-  for image in "$@"; do
-    acr_name="$(acr_name_from_image "${image}")"
-    if [[ -z "${acr_name}" ]]; then
-      continue
-    fi
-    if [[ "${logged_in}" == *" ${acr_name} "* ]]; then
-      continue
-    fi
-    echo "Logging in to ${acr_name}.azurecr.io"
-    az acr login --name "${acr_name}"
-    logged_in+="${acr_name} "
-  done
-}
-
-publish_backup_agent_image() {
-  local release_version="${FDB_RELEASE_BLOB_VERSION:-0.0.0}"
-  local binary_dir="build_output/packages/bin"
-  local backup_agent="${binary_dir}/backup_agent"
-  local fdbcli="${binary_dir}/fdbcli"
-  local client_library="build_output/packages/lib/libfdb_c.so"
-  local base_version="${FDB_BACKUP_AGENT_IMAGE_BASE_VERSION:-}"
-  local base_minor_version
-  local base_repository="${FDB_BACKUP_AGENT_IMAGE_BASE_REPOSITORY:-openaiapibase.azurecr.io/mirror/foundationdb/foundationdb}"
-  local base_image="${FDB_BACKUP_AGENT_IMAGE_BASE_IMAGE:-}"
-  local extra_library_version="${FDB_BACKUP_AGENT_IMAGE_EXTRA_LIBRARY_VERSION:-7.4.3}"
-  local extra_library_image="${FDB_BACKUP_AGENT_IMAGE_EXTRA_LIBRARY_IMAGE:-}"
-  local platform="${FDB_BACKUP_AGENT_IMAGE_PLATFORM:-linux/amd64}"
-  local dest_image="${FDB_BACKUP_AGENT_DEST_IMAGE:-}"
-  local staging_dest_image
-  local image_context
-  local build_args=()
-
-  if [[ -z "${FDB_RELEASE_BLOB_VERSION:-}" ]]; then
-    echo "FDB_RELEASE_BLOB_VERSION not set; building backup_agent image locally without publishing"
-    FDB_BACKUP_AGENT_IMAGE_PUSH=0
-    # Unpublished branches do not have a release image yet. Reuse the known
-    # compatibility image while preserving project_version() below for the
-    # injected branch library's versioned name.
-    if [[ -z "${base_image}" ]]; then
-      base_image="${base_repository}:${extra_library_version}"
-    fi
-  fi
-
-  release_version="$(sanitize_path_component "${release_version}")"
-  if [[ -z "${base_version}" ]]; then
-    base_version="$(project_version)"
-  fi
-  if [[ -z "${base_version}" ]]; then
-    echo "Could not determine backup_agent base image version" >&2
-    return 1
-  fi
-  if ! base_minor_version="$(minor_version "${base_version}")"; then
-    echo "Could not determine backup_agent base image minor version from ${base_version}" >&2
-    return 1
-  fi
-  if [[ -z "${base_image}" ]]; then
-    base_image="${base_repository}:${base_version}"
-  fi
-  if [[ -z "${extra_library_image}" ]]; then
-    extra_library_image="${base_repository}:${extra_library_version}"
-  fi
-
-  if [[ -z "${dest_image}" ]]; then
-    dest_image="openaiapibase.azurecr.io/mirror/foundationdb/foundationdb:${release_version}"
-  fi
-  # Empty is intentionally treated as unset; staging publication is always enabled.
-  if [[ -n "${FDB_BACKUP_AGENT_STAGING_DEST_IMAGE:-}" ]]; then
-    staging_dest_image="${FDB_BACKUP_AGENT_STAGING_DEST_IMAGE}"
-  else
-    staging_dest_image="openaiapistaging.azurecr.io/api/foundationdb/foundationdb:${release_version}"
-  fi
-
-  if [[ ! -f "${backup_agent}" ]]; then
-    echo "Missing backup_agent binary ${backup_agent}" >&2
-    return 1
-  fi
-  if [[ ! -f "${fdbcli}" ]]; then
-    echo "Missing fdbcli binary ${fdbcli}" >&2
-    return 1
-  fi
-  if [[ ! -f "${client_library}" ]]; then
-    echo "Missing backup_agent client library ${client_library}" >&2
-    return 1
-  fi
-
-  image_context="$(mktemp -d /tmp/fdb-backup-agent-image.XXXXXX)"
-  cp "${backup_agent}" "${image_context}/backup_agent"
-  cp "${fdbcli}" "${image_context}/fdbcli"
-  cp "${client_library}" "${image_context}/libfdb_c.so"
-
-  echo "--- Publishing backup_agent image"
-  echo "~~~ Image inputs"
-  echo "Using backup_agent artifact ${backup_agent}"
-  echo "Using base FoundationDB image ${base_image}"
-  echo "Using branch client library ${client_library} as libfdb_c_${base_minor_version}.so"
-  echo "Copying extra client libraries from ${extra_library_image}"
-  echo "Publishing ${dest_image}"
-
-  build_args=(
-    --platform "${platform}"
-    --build-arg "BASE_FDB_IMAGE=${base_image}"
-    --build-arg "BASE_FDB_MINOR_VERSION=${base_minor_version}"
-    --build-arg "EXTRA_FDB_LIBRARY_IMAGE=${extra_library_image}"
-    --tag "${dest_image}"
-  )
-  if [[ "${FDB_BACKUP_AGENT_IMAGE_PUSH:-1}" == "0" ]]; then
-    echo "FDB_BACKUP_AGENT_IMAGE_PUSH=0; skipping backup_agent image publish"
-    staging_dest_image=""
-    build_args+=(--load)
-  fi
-
-  if [[ -n "${staging_dest_image}" ]]; then
-    echo "Publishing ${staging_dest_image}"
-    build_args+=(--tag "${staging_dest_image}" --push)
-  fi
-
-  login_to_acr_registries "${dest_image}" "${staging_dest_image}" "${base_image}" "${extra_library_image}"
-  if ! docker buildx build \
-    "${build_args[@]}" \
-    -f building/docker/Dockerfile.backup-agent \
-    "${image_context}"; then
-    rm -rf "${image_context}"
-    return 1
-  fi
-
-  if [[ "${FDB_BACKUP_AGENT_IMAGE_PUSH:-1}" != "0" ]]; then
-    if ! docker pull --platform "${platform}" "${dest_image}"; then
-      rm -rf "${image_context}"
-      return 1
-    fi
-  fi
-
-  echo "--- Verifying backup_agent image"
-  if ! docker run --rm \
-    --platform "${platform}" \
-    --entrypoint /usr/bin/fdbbackup \
-    "${dest_image}" \
-    --version; then
-    rm -rf "${image_context}"
-    return 1
-  fi
-
-  rm -rf "${image_context}"
-}
-
 collect_changed_cpp_header_files() {
   local diff_range=""
   local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}"
@@ -448,13 +272,6 @@ prepare_step_artifacts() {
 
   rm -rf "${step_artifact_dir}"
   mkdir -p "${step_artifact_dir}"
-  # backup_agent is a symlink to fdbbackup in the package output. Dereference it
-  # so the downstream job does not extract a dangling symlink without its target.
-  tar -chzf "${backup_agent_inputs_artifact}" \
-    "${package_dir}/bin/backup_agent" \
-    "${package_dir}/bin/fdbcli" \
-    "${package_dir}/lib/libfdb_c.so"
-
   shopt -s nullglob
   tarballs=("${package_dir}/correctness"*.tar.gz)
   shopt -u nullglob
@@ -470,7 +287,6 @@ prepare_step_artifacts() {
   fi
   cp "${selected_tarball}" "${correctness_artifact}"
 
-  echo "Prepared ${backup_agent_inputs_artifact}"
   echo "Prepared ${correctness_artifact} from $(basename "${selected_tarball}")"
 }
 
@@ -483,19 +299,12 @@ download_build_artifact() {
 
 run_mode="${1:-all}"
 case "${run_mode}" in
-  all|build|build-backup-agent-image|submit-joshua) ;;
+  all|build|submit-joshua) ;;
   *)
-    echo "Usage: $0 [build|build-backup-agent-image|submit-joshua]" >&2
+    echo "Usage: $0 [build|submit-joshua]" >&2
     exit 2
     ;;
 esac
-
-if [[ "${run_mode}" == "build-backup-agent-image" ]]; then
-  download_build_artifact "${backup_agent_inputs_artifact}"
-  tar -xzf "${backup_agent_inputs_artifact}"
-  publish_backup_agent_image
-  exit 0
-fi
 
 if [[ "${run_mode}" == "submit-joshua" ]]; then
   download_build_artifact "${correctness_artifact}"
@@ -572,7 +381,6 @@ if [[ "${run_mode}" == "build" ]]; then
   exit 0
 fi
 
-publish_backup_agent_image
 fi
 
 tarball_dir="build_output/packages"
