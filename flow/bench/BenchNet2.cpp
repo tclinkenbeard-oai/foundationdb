@@ -38,6 +38,38 @@ static inline TaskPriority getRandomTaskPriority(DeterministicRandom& rand) {
 	return static_cast<TaskPriority>(rand.randomInt(0, 100));
 }
 
+template <bool useCache>
+static void activeTrackerLookup(benchmark::State& benchState) {
+	const int priorityCount = benchState.range(0);
+	std::vector<TaskPriority> priorities(4096);
+	DeterministicRandom rand(0);
+	for (auto& priority : priorities) {
+		priority = static_cast<TaskPriority>(rand.randomInt(0, priorityCount));
+	}
+
+	NetworkMetrics metrics;
+	size_t index = 0;
+	for (auto _ : benchState) {
+		auto priority = priorities[index++ % priorities.size()];
+		if constexpr (useCache) {
+			benchmark::DoNotOptimize(&metrics.getActiveTracker(priority));
+		} else {
+			benchmark::DoNotOptimize(&metrics.activeTrackers.try_emplace(priority, priority).first->second);
+		}
+	}
+}
+
+static void active_tracker_map_lookup(benchmark::State& benchState) {
+	activeTrackerLookup<false>(benchState);
+}
+
+static void active_tracker_cached_lookup(benchmark::State& benchState) {
+	activeTrackerLookup<true>(benchState);
+}
+
+BENCHMARK(active_tracker_map_lookup)->Arg(2)->Arg(32)->Arg(100);
+BENCHMARK(active_tracker_cached_lookup)->Arg(2)->Arg(32)->Arg(100);
+
 static Future<Void> benchNet2Actor(benchmark::State* benchState) {
 	size_t actorCount = benchState->range(0);
 	uint32_t sum;

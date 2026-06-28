@@ -426,6 +426,35 @@ IUDPSocket::~IUDPSocket() = default;
 
 const std::vector<int> NetworkMetrics::starvationBins = { 1, 3500, 7000, 7500, 8500, 8900, 10500 };
 
+TEST_CASE("/flow/network/activeTrackerCache") {
+	NetworkMetrics metrics;
+	const auto firstPriority = static_cast<TaskPriority>(17);
+	const auto collidingPriority = static_cast<TaskPriority>(17 + 256);
+
+	auto* firstTracker = &metrics.getActiveTracker(firstPriority);
+	ASSERT(firstTracker->priority == firstPriority);
+	ASSERT(&metrics.getActiveTracker(firstPriority) == firstTracker);
+	for (int priority = 1000; priority < 1200; ++priority) {
+		metrics.activeTrackers.try_emplace(static_cast<TaskPriority>(priority), static_cast<TaskPriority>(priority));
+	}
+	ASSERT(&metrics.getActiveTracker(firstPriority) == firstTracker);
+
+	auto* collidingTracker = &metrics.getActiveTracker(collidingPriority);
+	ASSERT(collidingTracker->priority == collidingPriority);
+	ASSERT(collidingTracker != firstTracker);
+	ASSERT(&metrics.getActiveTracker(firstPriority) == firstTracker);
+	ASSERT(metrics.activeTrackers.size() == 202);
+
+	NetworkMetrics copiedMetrics;
+	copiedMetrics.getActiveTracker(firstPriority);
+	copiedMetrics = metrics;
+	ASSERT(&copiedMetrics.getActiveTracker(firstPriority) != firstTracker);
+	ASSERT(copiedMetrics.getActiveTracker(firstPriority).priority == firstPriority);
+	ASSERT(copiedMetrics.activeTrackers.size() == metrics.activeTrackers.size());
+
+	return Void();
+}
+
 TEST_CASE("/flow/network/ipaddress") {
 	ASSERT(NetworkAddress::parse("[::1]:4800").toString() == "[::1]:4800");
 

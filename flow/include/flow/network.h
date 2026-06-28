@@ -32,6 +32,7 @@
 #include <string>
 #include <stdint.h>
 #include <atomic>
+#include <array>
 #include <unordered_map>
 #include "flow/IRandom.h"
 #include "flow/ProtocolVersion.h"
@@ -68,6 +69,14 @@ struct NetworkMetrics {
 		explicit PriorityStats(TaskPriority priority) : priority(priority) {}
 	};
 
+	PriorityStats& getActiveTracker(TaskPriority priority) {
+		auto& cachedTracker = activeTrackerCache[activeTrackerCacheIndex(priority)];
+		if (cachedTracker == nullptr || cachedTracker->priority != priority) {
+			cachedTracker = &activeTrackers.try_emplace(priority, priority).first->second;
+		}
+		return *cachedTracker;
+	}
+
 	std::unordered_map<TaskPriority, struct PriorityStats> activeTrackers;
 	double lastRunLoopBusyness; // network thread busyness (measured every 5s by default)
 	std::atomic<double>
@@ -95,12 +104,27 @@ struct NetworkMetrics {
 		secSquaredSubmit = rhs.secSquaredSubmit;
 		secSquaredDiskStall = rhs.secSquaredDiskStall;
 		activeTrackers = rhs.activeTrackers;
+		activeTrackerCache.fill(nullptr);
 		lastRunLoopBusyness = rhs.lastRunLoopBusyness;
 		networkBusyness = rhs.networkBusyness.load();
 		starvationTrackers = rhs.starvationTrackers;
 		starvationTrackerNetworkBusyness = rhs.starvationTrackerNetworkBusyness;
 		return *this;
 	}
+
+private:
+	// Task priorities are sparse and may be created dynamically, so retain the map as the source of truth. The direct
+	// mapped cache avoids repeated hash-table lookups for the small working set exercised by the run loop. References
+	// to unordered_map elements remain valid across rehashes; the map is append-only between assignments, and
+	// assignment clears the cache.
+	static constexpr size_t ACTIVE_TRACKER_CACHE_SIZE = 256;
+	static_assert((ACTIVE_TRACKER_CACHE_SIZE & (ACTIVE_TRACKER_CACHE_SIZE - 1)) == 0);
+
+	static size_t activeTrackerCacheIndex(TaskPriority priority) {
+		return static_cast<size_t>(static_cast<uint32_t>(priority)) & (ACTIVE_TRACKER_CACHE_SIZE - 1);
+	}
+
+	std::array<PriorityStats*, ACTIVE_TRACKER_CACHE_SIZE> activeTrackerCache{};
 };
 
 struct FlowLock;

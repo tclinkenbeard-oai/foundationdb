@@ -1849,9 +1849,9 @@ void Net2::updateStarvationTracker(struct NetworkMetrics::PriorityStats& binStat
 void Net2::trackAtPriority(TaskPriority priority, double now) {
 	if (lastPriorityStats == nullptr || priority != lastPriorityStats->priority) {
 		// Start tracking current priority
-		auto activeStatsItr = networkInfo.metrics.activeTrackers.try_emplace(priority, priority);
-		activeStatsItr.first->second.active = true;
-		activeStatsItr.first->second.windowedTimer = now;
+		auto& activeStats = networkInfo.metrics.getActiveTracker(priority);
+		activeStats.active = true;
+		activeStats.windowedTimer = now;
 
 		if (lastPriorityStats != nullptr) {
 			// Stop tracking previous priority
@@ -1871,7 +1871,7 @@ void Net2::trackAtPriority(TaskPriority priority, double now) {
 		// Update starvation trackers for network busyness
 		updateStarvationTracker(networkInfo.metrics.starvationTrackerNetworkBusyness, priority, lastPriority, now);
 
-		lastPriorityStats = &activeStatsItr.first->second;
+		lastPriorityStats = &activeStats;
 	}
 }
 
