@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-#include "fdbserver/datadistributor/DataDistribution.h"
+#include "fdbserver/datadistributor/PhysicalShardCollection.h"
 
 #include <unordered_set>
 

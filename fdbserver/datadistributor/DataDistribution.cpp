@@ -39,6 +39,7 @@
 #include "fdbserver/datadistributor/DDSharedContext.h"
 #include "fdbserver/datadistributor/DDTeamCollection.h"
 #include "fdbserver/datadistributor/DataDistribution.h"
+#include "fdbserver/datadistributor/PhysicalShardCollection.h"
 #include "DDRelocationQueue.h"
 #include "fdbserver/core/Knobs.h"
 #include "fdbserver/core/MoveKeys.h"

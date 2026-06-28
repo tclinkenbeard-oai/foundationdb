@@ -23,6 +23,7 @@
 #include <numeric>
 
 #include "fdbserver/datadistributor/DataDistribution.h"
+#include "fdbserver/datadistributor/PhysicalShardCollection.h"
 #include "MovingWindow.h"
 
 // send request/signal to DDRelocationQueue through interface
