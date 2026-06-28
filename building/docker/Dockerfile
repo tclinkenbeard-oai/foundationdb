@@ -44,7 +44,7 @@ RUN --mount=type=bind,target=/src/fdb,rw \
         -G Ninja -B build_output -S . && \
     cd /src/fdb/build_output && \
     ninja -j20 && \
-    ninja -j20 strip_fdbserver strip_fdbbackup strip_fdbcli strip_fdbmonitor strip_fdb_c && \
+    ninja -j20 strip_fdbserver strip_fdbbackup strip_fdbcli strip_fdbmonitor strip_fdb_c strip_mako && \
     ninja -j20 bindings/python/python_binding && \
     mkdir -p /src/fdb/build_output/packages/include/foundationdb && \
     install -m 0644 \
