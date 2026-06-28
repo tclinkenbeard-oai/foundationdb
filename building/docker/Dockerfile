@@ -44,8 +44,15 @@ RUN --mount=type=bind,target=/src/fdb,rw \
         -G Ninja -B build_output -S . && \
     cd /src/fdb/build_output && \
     ninja -j20 && \
-    ninja -j20 strip_fdbserver strip_fdbbackup strip_fdbcli strip_fdbmonitor && \
+    ninja -j20 strip_fdbserver strip_fdbbackup strip_fdbcli strip_fdbmonitor strip_fdb_c && \
     ninja -j20 bindings/python/python_binding && \
+    mkdir -p /src/fdb/build_output/packages/include/foundationdb && \
+    install -m 0644 \
+        /src/fdb/bindings/c/foundationdb/fdb_c.h \
+        /src/fdb/build_output/bindings/c/foundationdb/fdb_c_apiversion.g.h \
+        /src/fdb/build_output/bindings/c/foundationdb/fdb_c_options.g.h \
+        /src/fdb/bindings/c/foundationdb/fdb_c_types.h \
+        /src/fdb/build_output/packages/include/foundationdb/ && \
     ( SCCACHE_DIR=/root/.cache/sccache sccache --show-stats || true ) && \
     mkdir -p /out && \
     cp -a /src/fdb/build_output/packages /out/
