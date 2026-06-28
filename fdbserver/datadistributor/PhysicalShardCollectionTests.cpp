@@ -25,6 +25,8 @@
 #include "fdbserver/core/Knobs.h"
 #include "flow/UnitTest.h"
 
+void forceLinkPhysicalShardCollectionTests() {}
+
 namespace {
 
 struct PhysicalShardKnobGuard {
