@@ -168,10 +168,18 @@ upload_release_artifacts() {
   local release_version="${FDB_RELEASE_BLOB_VERSION:-}"
   local release_arch
   local release_dest
+  local package_dir="build_output/packages"
   local binary_dir="build_output/packages/bin"
   local binaries=(fdbserver fdbbackup fdbrestore backup_agent fdbcli fdbmonitor)
   local debug_symbols=(fdbserver.debug fdbbackup.debug fdbcli.debug fdbmonitor.debug)
-  local artifacts=("${binaries[@]}" "${debug_symbols[@]}")
+  local binary_artifacts=("${binaries[@]}" "${debug_symbols[@]}")
+  local client_artifacts=(
+    lib/libfdb_c.so
+    include/foundationdb/fdb_c.h
+    include/foundationdb/fdb_c_apiversion.g.h
+    include/foundationdb/fdb_c_options.g.h
+    include/foundationdb/fdb_c_types.h
+  )
   local artifact
 
   if [[ -z "${release_version}" ]]; then
@@ -183,18 +191,32 @@ upload_release_artifacts() {
   release_arch="$(sanitize_path_component "${FDB_RELEASE_BLOB_ARCH:-$(uname -m)}")"
   release_dest="${release_dest_root}/${release_version}/${release_arch}"
 
-  for artifact in "${artifacts[@]}"; do
+  for artifact in "${binary_artifacts[@]}"; do
     if [[ ! -f "${binary_dir}/${artifact}" ]]; then
       echo "Missing release artifact ${binary_dir}/${artifact}" >&2
       return 1
     fi
   done
 
+  for artifact in "${client_artifacts[@]}"; do
+    if [[ ! -f "${package_dir}/${artifact}" ]]; then
+      echo "Missing release artifact ${package_dir}/${artifact}" >&2
+      return 1
+    fi
+  done
+
   echo "--- Uploading release artifacts"
-  echo "Uploading release binaries and debug symbols to ${release_dest}"
+  echo "Uploading release binaries, debug symbols, and C client artifacts to ${release_dest}"
   (
     cd "${binary_dir}"
-    for artifact in "${artifacts[@]}"; do
+    for artifact in "${binary_artifacts[@]}"; do
+      BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${release_dest}" \
+        buildkite-agent artifact upload "${artifact}"
+    done
+  )
+  (
+    cd "${package_dir}"
+    for artifact in "${client_artifacts[@]}"; do
       BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${release_dest}" \
         buildkite-agent artifact upload "${artifact}"
     done
