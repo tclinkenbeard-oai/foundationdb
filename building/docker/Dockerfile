@@ -39,12 +39,13 @@ RUN --mount=type=bind,target=/src/fdb,rw \
         -D CMAKE_C_COMPILER_LAUNCHER=sccache \
         -D CMAKE_CXX_COMPILER_LAUNCHER=sccache \
         -D USE_LD=LLD -D USE_LIBCXX=1 -D USE_PYTHON_AC=$ENABLE_PYTHON_AC \
+        -D BUILD_MAKO=ON \
         -D FULL_DEBUG_SYMBOLS=ON \
         -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -G Ninja -B build_output -S . && \
     cd /src/fdb/build_output && \
     ninja -j20 && \
-    ninja -j20 strip_fdbserver strip_fdbbackup strip_fdbcli strip_fdbmonitor strip_fdb_c && \
+    ninja -j20 strip_fdbserver strip_fdbbackup strip_fdbcli strip_fdbmonitor strip_fdb_c strip_mako && \
     ninja -j20 bindings/python/python_binding && \
     mkdir -p /src/fdb/build_output/packages/include/foundationdb && \
     install -m 0644 \

@@ -169,8 +169,8 @@ upload_release_artifacts() {
   local release_dest
   local package_dir="build_output/packages"
   local binary_dir="build_output/packages/bin"
-  local binaries=(fdbserver fdbbackup fdbrestore backup_agent fdbcli fdbmonitor)
-  local debug_symbols=(fdbserver.debug fdbbackup.debug fdbcli.debug fdbmonitor.debug)
+  local binaries=(fdbserver fdbbackup fdbrestore backup_agent fdbcli fdbmonitor mako)
+  local debug_symbols=(fdbserver.debug fdbbackup.debug fdbcli.debug fdbmonitor.debug mako.debug)
   local binary_artifacts=("${binaries[@]}" "${debug_symbols[@]}")
   local client_artifacts=(
     lib/libfdb_c.so
