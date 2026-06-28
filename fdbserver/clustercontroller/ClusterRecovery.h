@@ -270,7 +270,8 @@ struct ClusterRecoveryData : NonCopyable, ReferenceCounted<ClusterRecoveryData> 
 	    databaseLocked(false), minKnownCommittedVersion(invalidVersion), hasConfiguration(false),
 	    coordinators(coordinators), lastVersionTime(0), txnStateStore(nullptr), memoryLimit(2e9), dbId(dbId),
 	    masterInterface(masterInterface), masterLifetime(masterLifetimeToken), clusterController(clusterController),
-	    cstate(coordinators, addActor, dbgid), dbInfo(dbInfo), registrationCount(0), addActor(addActor),
+	    cstate(coordinators, addActor, dbgid), dbInfo(dbInfo), registrationCount(0),
+	    recoveryState(RecoveryState::UNINITIALIZED), addActor(addActor),
 	    recruitmentStalled(makeReference<AsyncVar<bool>>(false)), forceRecovery(forceRecovery), neverCreated(false),
 	    safeLocality(tagLocalityInvalid), primaryLocality(tagLocalityInvalid),
 	    cc("ClusterRecoveryData", dbgid.toString()), changeCoordinatorsRequests("ChangeCoordinatorsRequests", cc),
@@ -292,7 +293,8 @@ struct ClusterRecoveryData : NonCopyable, ReferenceCounted<ClusterRecoveryData> 
 		logger = cc.traceCounters(getRecoveryEventName(ClusterRecoveryEventType::CLUSTER_RECOVERY_METRICS_EVENT_NAME),
 		                          dbgid,
 		                          SERVER_KNOBS->WORKER_LOGGING_INTERVAL,
-		                          getRecoveryEventName(ClusterRecoveryEventType::CLUSTER_RECOVERY_METRICS_EVENT_NAME));
+		                          getRecoveryEventName(ClusterRecoveryEventType::CLUSTER_RECOVERY_METRICS_EVENT_NAME),
+		                          [this](TraceEvent& te) { te.detail("RecoveryState", (int)recoveryState); });
 		if (forceRecovery && !controllerData->clusterControllerDcId.present()) {
 			TraceEvent(SevError, "ForcedRecoveryRequiresDcID").log();
 			forceRecovery = false;
