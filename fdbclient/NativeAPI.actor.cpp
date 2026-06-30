@@ -2761,6 +2761,18 @@ static void clearClientMetrics() {
 
 ACTOR static Future<Void> stopNetworkOnMainThread() {
 	ASSERT(g_network->isOnMainThread());
+	// Cleanup that was reserved before beginThreadSafeCleanup() must stay ordered
+	// behind older main-thread work.  Yield until those queued callbacks drain
+	// instead of blocking the network thread that has to run them.
+	loop {
+		if (isThreadSafeCleanupComplete()) {
+			break;
+		}
+		wait(delay(0));
+	}
+	// New cleanup runs inline after draining begins.  This only blocks for any
+	// foreign thread that is already finishing such cleanup.
+	waitForThreadSafeCleanup();
 	if (g_network->global(INetwork::enFlowTransport)) {
 		wait(ready(FlowTransport::transport().shutdown()));
 	}
@@ -2781,12 +2793,13 @@ void stopNetwork() {
 	}
 	ThreadSafeDatabase::closeAllDatabases();
 	beginThreadSafeCleanup();
-	waitForThreadSafeCleanup();
-	// fdbcli calls stopNetwork() from this thread, where blocking on an onMainThread() task would deadlock.
+	// fdbcli calls stopNetwork() from this thread, where blocking while cleanup
+	// remains queued to the same thread would deadlock.
 	if (g_network->isOnMainThread()) {
 		uncancellable(stopNetworkOnMainThread());
 		return;
 	}
+	waitForThreadSafeCleanup();
 	if (g_network->global(INetwork::enFlowTransport)) {
 		onMainThread([]() -> Future<Void> { return FlowTransport::transport().shutdown(); }).blockUntilReady();
 	}

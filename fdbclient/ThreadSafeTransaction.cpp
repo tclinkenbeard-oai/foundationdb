@@ -47,19 +47,21 @@ public:
 		return tracker;
 	}
 
-	void beginDraining() { draining.store(true, std::memory_order_release); }
+	void beginDraining() { state.fetch_or(drainingBit, std::memory_order_acq_rel); }
+
+	bool isComplete() const { return pendingCount() == 0; }
 
 	void waitForDrain() {
 		std::unique_lock<std::mutex> lk(mutex);
-		cv.wait(lk, [&] { return pending.load(std::memory_order_acquire) == 0; });
+		cv.wait(lk, [&] { return isComplete(); });
 	}
 
 	template <class Fn>
 	void schedule(Fn&& fn) {
 		// Reserve the work before checking the drain state so waitForDrain() cannot
 		// miss a callback that was already on its way to the main thread.
-		pending.fetch_add(1, std::memory_order_acq_rel);
-		if (shouldRunInline()) {
+		const auto stateBeforeReservation = state.fetch_add(1, std::memory_order_acq_rel);
+		if (shouldRunInline(stateBeforeReservation)) {
 			std::forward<Fn>(fn)();
 			markDone();
 			return;
@@ -71,14 +73,21 @@ public:
 	}
 
 private:
+	static constexpr uint64_t drainingBit = uint64_t{ 1 } << 63;
+	static constexpr uint64_t pendingMask = drainingBit - 1;
+
+	uint64_t pendingCount() const { return state.load(std::memory_order_acquire) & pendingMask; }
+
 	void markDone() {
-		if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+		const auto stateBeforeCompletion = state.fetch_sub(1, std::memory_order_acq_rel);
+		ASSERT((stateBeforeCompletion & pendingMask) > 0);
+		if ((stateBeforeCompletion & pendingMask) == 1) {
 			cv.notify_all();
 		}
 	}
 
-	bool shouldRunInline() const {
-		if (draining.load(std::memory_order_acquire)) {
+	bool shouldRunInline(uint64_t stateBeforeReservation) const {
+		if (stateBeforeReservation & drainingBit) {
 			return true;
 		}
 		if (!g_network) {
@@ -87,14 +96,14 @@ private:
 		if (g_network->isStopped()) {
 			return true;
 		}
-		if (g_network->isOnMainThread()) {
-			return true;
-		}
+		// Keep live-network cleanup ordered behind work that has already been
+		// queued to the main thread.  Running inline from the main thread can
+		// destroy a transaction before an older callback that still captures it
+		// gets a chance to run.
 		return false;
 	}
 
-	std::atomic<int> pending{ 0 };
-	std::atomic<bool> draining{ false };
+	std::atomic<uint64_t> state{ 0 };
 	mutable std::mutex mutex;
 	std::condition_variable cv;
 
@@ -118,6 +127,10 @@ void beginThreadSafeCleanup() {
 
 void waitForThreadSafeCleanup() {
 	ThreadSafeCleanupTracker::instance().waitForDrain();
+}
+
+bool isThreadSafeCleanupComplete() {
+	return ThreadSafeCleanupTracker::instance().isComplete();
 }
 
 // Users of ThreadSafeTransaction might share Reference<ThreadSafe...> between different threads as long as they don't

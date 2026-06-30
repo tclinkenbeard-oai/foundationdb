@@ -323,5 +323,6 @@ private:
 
 void beginThreadSafeCleanup();
 void waitForThreadSafeCleanup();
+bool isThreadSafeCleanupComplete();
 
 #endif
