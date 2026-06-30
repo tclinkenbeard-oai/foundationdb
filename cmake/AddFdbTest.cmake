@@ -620,12 +620,19 @@ string(APPEND test_venv_cmd "&& pip install -r ${CMAKE_SOURCE_DIR}/tests/TestRun
 string(APPEND test_venv_cmd "&& pip install -e ${CMAKE_SOURCE_DIR}/tests/TestRunner ")
 # NOTE: At this stage we are in the virtual environment and Python3_EXECUTABLE is not available anymore
 string(APPEND test_venv_cmd "&& (cd ${CMAKE_BINARY_DIR}/bindings/python && python3 -m pip install .) ")
-add_test(
-  NAME test_venv_setup
-  COMMAND bash -c ${test_venv_cmd}
-  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(test_venv_setup PROPERTIES FIXTURES_SETUP test_virtual_env_setup TIMEOUT 120)
-set_tests_properties(test_venv_setup PROPERTIES RESOURCE_LOCK TEST_VENV_SETUP)
+# AddFdbTest.cmake is included by multiple subdirectories. Registering this
+# setup test more than once lets duplicate fixtures rebuild the same venv
+# concurrently while dependent tests are already running.
+get_property(test_venv_setup_added GLOBAL PROPERTY FDB_TEST_VENV_SETUP_ADDED)
+if(NOT test_venv_setup_added)
+  add_test(
+    NAME test_venv_setup
+    COMMAND bash -c ${test_venv_cmd}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(test_venv_setup PROPERTIES FIXTURES_SETUP test_virtual_env_setup TIMEOUT 120)
+  set_tests_properties(test_venv_setup PROPERTIES RESOURCE_LOCK TEST_VENV_SETUP)
+  set_property(GLOBAL PROPERTY FDB_TEST_VENV_SETUP_ADDED TRUE)
+endif()
 
 # Run the test command under Python venv as a cmd (Windows) or bash (Linux/Apple) script, which allows && or || chaining.
 function(add_python_venv_test)
