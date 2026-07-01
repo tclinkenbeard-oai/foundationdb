@@ -1,40 +1,27 @@
-# Lock the version of rocky linux to one that is the same as the base image that we use for the
-# backup agent
-FROM openaiapibase.azurecr.io/mirror/foundationdb/rockylinux9-latest@sha256:27e84fcd4a82e63b1f499cf199c84fe9a1831c8858947b3d9e0434b22317075a AS base
-
+# Built by Dockerfile.fdb-ci-base from the pinned Rocky Linux toolchain,
+# sccache, clang-format, and patched zstd. The digest makes ordinary builds
+# independent of mutable tags and avoids rebuilding these layers per job.
+FROM openaiapibase.azurecr.io/mirror/foundationdb/fdb-ci-base:rockylinux9-sccache-0.15.0-zstd-1.5.7-fdb-001-clang-format-19.1.5@sha256:8d5cce290a721f89c656c790e5c984f573b6e0ee036005063c2adfe34c485fae AS base
 
 ARG ENABLE_PYTHON_AC=0
-ARG SCCACHE_VERSION=0.15.0
 
 ENV ENABLE_PYTHON_AC=${ENABLE_PYTHON_AC}
-
-RUN curl -fsSL \
-      https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz \
-      -o /tmp/sccache.tar.gz && \
-    tar -xzf /tmp/sccache.tar.gz --strip-components=1 -C /usr/local/bin && \
-    rm -f /tmp/sccache.tar.gz
-
-COPY building/docker/patches /patches
-RUN curl -L https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz -o /tmp/zstd-1.5.7.tar.gz && \
-    tar -xvf /tmp/zstd-1.5.7.tar.gz -C /tmp && \
-    cd /tmp/zstd-1.5.7 && \
-    patch -p1 < /patches/zstd-1.5.7-fdb-001.patch && \
-    make cmakebuild
-
 
 FROM base AS buildfdb
 # Note we put the build output inside the mounted source because otherwise I/O perf are terrible it
 # seems but we will need to store it somewhere at the end of this RUN otherwise it will be lost ...
 RUN --mount=type=bind,target=/src/fdb,rw \
-    --mount=type=cache,target=/root/.cache/sccache \
-    --mount=type=secret,id=sccache_env \
+    --mount=type=secret,id=sccache_env,required=true \
     mkdir -p /src/fdb/build_output && \
+    mkdir -p /src/fdb/.buildkite-artifacts && \
     rm -rf /src/fdb/build_output/* && \
     cd /src/fdb && \
     while IFS='=' read -r key value; do \
         [ -n "${key}" ] && export "${key}=${value}"; \
     done < /run/secrets/sccache_env && \
-    SCCACHE_DIR=/root/.cache/sccache \
+    test -n "${SCCACHE_AZURE_CONNECTION_STRING:-}" && \
+    test -n "${SCCACHE_AZURE_BLOB_CONTAINER:-}" && \
+    test -n "${SCCACHE_AZURE_KEY_PREFIX:-}" && \
     CC=clang CXX=clang++ LD=lld cmake \
         -D CMAKE_C_COMPILER_LAUNCHER=sccache \
         -D CMAKE_CXX_COMPILER_LAUNCHER=sccache \
@@ -43,6 +30,8 @@ RUN --mount=type=bind,target=/src/fdb,rw \
         -D FULL_DEBUG_SYMBOLS=ON \
         -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -G Ninja -B build_output -S . && \
+    grep -Eq '^CMAKE_C_COMPILER_LAUNCHER(:[^=]+)?=sccache$' build_output/CMakeCache.txt && \
+    grep -Eq '^CMAKE_CXX_COMPILER_LAUNCHER(:[^=]+)?=sccache$' build_output/CMakeCache.txt && \
     cd /src/fdb/build_output && \
     ninja -j20 && \
     ninja -j20 strip_fdbserver strip_fdbbackup strip_fdbcli strip_fdbmonitor strip_fdb_c strip_mako && \
@@ -54,7 +43,9 @@ RUN --mount=type=bind,target=/src/fdb,rw \
         /src/fdb/build_output/bindings/c/foundationdb/fdb_c_options.g.h \
         /src/fdb/bindings/c/foundationdb/fdb_c_types.h \
         /src/fdb/build_output/packages/include/foundationdb/ && \
-    ( SCCACHE_DIR=/root/.cache/sccache sccache --show-stats || true ) && \
+    sccache --show-stats | \
+        tee /src/fdb/.buildkite-artifacts/sccache-stats.txt && \
+    grep -Eiq 'Cache location.*(azblob|azure)' /src/fdb/.buildkite-artifacts/sccache-stats.txt && \
     mkdir -p /out && \
     cp -a /src/fdb/build_output/packages /out/
 

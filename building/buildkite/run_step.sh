@@ -271,16 +271,12 @@ run_clang_format_check_in_docker() {
     return 1
   fi
 
-  clang_format_image="${CLANG_FORMAT_IMAGE:-foundationdb/devel:rockylinux9-latest}"
-  if ! docker image inspect "${clang_format_image}" >/dev/null 2>&1; then
-    echo "~~~ Downloading clang-format image"
-    echo "Pulling ${clang_format_image}"
-    docker pull "${clang_format_image}"
-  fi
+  clang_format_image="${CLANG_FORMAT_IMAGE:-openaiapibase.azurecr.io/mirror/foundationdb/fdb-ci-base:rockylinux9-sccache-0.15.0-zstd-1.5.7-fdb-001-clang-format-19.1.5@sha256:8d5cce290a721f89c656c790e5c984f573b6e0ee036005063c2adfe34c485fae}"
 
   echo "~~~ Checking changed files"
   echo "Checking clang-format for ${#changed_files[@]} changed *.h/*.cpp files in ${clang_format_image}"
   docker run --rm \
+    --platform linux/amd64 \
     -v "$(pwd):/workspace" \
     -w /workspace \
     "${clang_format_image}" \
