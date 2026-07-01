@@ -116,3 +116,7 @@ temp/
 *.aider*
 *.fdq
 .claude/
+
+# Tools internal directories
+.stacky
+.codex

@@ -13,6 +13,7 @@ readonly default_blob_container="fdb-ci-artifacts"
 readonly build_step_key="general-build"
 readonly step_artifact_dir=".buildkite-artifacts"
 readonly correctness_artifact="${step_artifact_dir}/correctness.tar.gz"
+readonly sccache_stats_artifact="${step_artifact_dir}/sccache-stats.txt"
 
 
 if ! command -v buildkite-agent >/dev/null; then
@@ -48,19 +49,6 @@ sanitize_path_component() {
   else
     echo "${value}"
   fi
-}
-
-resolve_cache_dest() {
-  local cache_scope
-  local cache_namespace
-  local arch
-  local python_ac
-
-  cache_scope="$(sanitize_path_component "${BUILDKITE_CACHE_SCOPE:-${default_cache_scope}}")"
-  cache_namespace="$(sanitize_path_component "${BUILDKITE_CACHE_NAMESPACE:-${default_cache_namespace}}")"
-  arch="$(sanitize_path_component "$(uname -m)")"
-  python_ac="$(sanitize_path_component "${ENABLE_PYTHON_AC:-0}")"
-  echo "${dest_root}/cache/${cache_namespace}/${cache_scope}/${arch}/pyac-${python_ac}"
 }
 
 resolve_sccache_key_prefix() {
@@ -102,65 +90,6 @@ create_sccache_env_file() {
     "$(resolve_sccache_key_prefix)" \
     > "${env_file}"
   echo "${env_file}"
-}
-
-buildx_cache_file_name() {
-  local cache_version
-  cache_version="$(sanitize_path_component "${BUILDX_CACHE_VERSION:-v1}")"
-  if tar --help 2>/dev/null | grep -q -- '--zstd'; then
-    echo "buildx-cache-${cache_version}.tar.zst"
-  else
-    echo "buildx-cache-${cache_version}.tar.gz"
-  fi
-}
-
-dir_has_files() {
-  local dir="${1}"
-  local found=""
-  if [[ ! -d "${dir}" ]]; then
-    return 1
-  fi
-  found="$(find "${dir}" -mindepth 1 -print -quit 2>/dev/null || true)"
-  [[ -n "${found}" ]]
-}
-
-restore_buildx_cache_from_url() {
-  python3 building/scripts/restore_buildx_cache_from_url.py "${1}"
-}
-
-restore_buildx_cache() {
-  local cache_file
-  local cache_dest
-  local cache_url
-
-  if ! command -v curl >/dev/null; then
-    echo "curl not found; skipping remote build cache restore"
-    return
-  fi
-
-  cache_file="$(buildx_cache_file_name)"
-  cache_dest="$(resolve_cache_dest)"
-  cache_url="${cache_dest}/${cache_file}"
-
-  echo "--- Build cache restore"
-  echo "Trying shared build cache ${cache_url}"
-  if restore_buildx_cache_from_url "${cache_url}"; then
-    echo "Shared build cache restored"
-    return
-  fi
-
-  echo "Shared build cache unavailable; continuing with a cold cache"
-}
-
-save_buildx_cache() {
-  local cache_file
-  local cache_dest
-
-  cache_file="$(buildx_cache_file_name)"
-  cache_dest="$(resolve_cache_dest)"
-  python3 building/scripts/save_buildx_cache.py \
-    --cache-file "${cache_file}" \
-    --cache-dest "${cache_dest}"
 }
 
 upload_release_artifacts() {
@@ -288,7 +217,6 @@ prepare_step_artifacts() {
   local tarballs=()
   local selected_tarball
 
-  rm -rf "${step_artifact_dir}"
   mkdir -p "${step_artifact_dir}"
   shopt -s nullglob
   tarballs=("${package_dir}/correctness"*.tar.gz)
@@ -374,23 +302,17 @@ else
 fi
 
 echo "--- Building artifacts"
-restore_buildx_cache
-mkdir -p .ci-cache
-rm -rf .ci-cache/buildx-new
+# Azure-backed sccache provides cross-pod object reuse. Do not restore or
+# rewrite a global multi-gigabyte BuildKit archive for ordinary builds.
+mkdir -p "${step_artifact_dir}"
+rm -f "${sccache_stats_artifact}"
 sccache_env_file="$(create_sccache_env_file)"
 trap 'rm -f "${preflight_file}" "${sccache_env_file}"' EXIT
-buildx_cache_from_args=()
-if dir_has_files ".ci-cache/buildx"; then
-  buildx_cache_from_args+=(--cache-from "type=local,src=.ci-cache/buildx")
-fi
 docker buildx build \
   --target artifacts \
-  "${buildx_cache_from_args[@]}" \
   --secret id=sccache_env,src="${sccache_env_file}" \
-  --cache-to type=local,dest=.ci-cache/buildx-new,mode=max \
   --output type=local,dest=build_output \
   -f building/docker/Dockerfile .
-save_buildx_cache
 upload_release_artifacts
 
 if [[ "${run_mode}" == "build" ]]; then

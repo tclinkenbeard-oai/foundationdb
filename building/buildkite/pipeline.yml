@@ -6,6 +6,7 @@ steps:
     command: "bash building/buildkite/general_build.sh"
     artifact_paths:
       - ".buildkite-artifacts/correctness.tar.gz"
+      - ".buildkite-artifacts/sccache-stats.txt"
 
   - label: ":test_tube: Submit Joshua job"
     key: "submit-joshua"
