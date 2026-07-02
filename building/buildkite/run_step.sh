@@ -324,11 +324,17 @@ fi
 fi
 
 tarball_dir="build_output/packages"
-shopt -s nullglob
-tarballs=("${tarball_dir}/correctness"*.tar.gz)
-shopt -u nullglob
+if [[ "${run_mode}" == "submit-joshua" ]]; then
+  # The submit step downloads the correctness artifact under this stable name.
+  # Ignore any versioned tarballs left behind in a reused Buildkite checkout.
+  tarballs=("${tarball_dir}/correctness.tar.gz")
+else
+  shopt -s nullglob
+  tarballs=("${tarball_dir}/correctness"*.tar.gz)
+  shopt -u nullglob
+fi
 
-if (( ${#tarballs[@]} )); then
+if (( ${#tarballs[@]} )) && [[ -f "${tarballs[0]}" ]]; then
   mapfile -t tarballs < <(printf '%s\n' "${tarballs[@]}" | sort)
   selected_tarball="${tarballs[0]}"
   selected_tarball_basename="$(basename "${selected_tarball}")"
@@ -344,7 +350,7 @@ if (( ${#tarballs[@]} )); then
   selected_tarball_url="${dest}/${selected_tarball_relative_path}"
   echo "Uploading correctness packages to ${dest}"
   if ! BUILDKITE_ARTIFACT_UPLOAD_DESTINATION="${dest}" \
-       buildkite-agent artifact upload "${tarballs[@]}"; then
+       buildkite-agent artifact upload "${selected_tarball}"; then
     echo "Failed to upload correctness packages" >&2
     exit 1
   fi
