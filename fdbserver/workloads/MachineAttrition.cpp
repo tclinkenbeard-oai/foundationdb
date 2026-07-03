@@ -131,6 +131,13 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		return work.useDatabase && random.random01() < 1.0 / (2.0 + alreadyAdded);
 	}
 
+	void disableFailureInjectionWorkloads(std::set<std::string>& out) const override {
+		// An explicitly configured Attrition workload already owns the test's machine-failure schedule. Adding an
+		// automatic Attrition actor gives the two workloads independent target lists, so they can select the same
+		// machine and violate each other's failure budgets.
+		out.insert("Attrition");
+	}
+
 	void initializeForInjection(DeterministicRandom& random) {
 		reboot = random.random01() < 0.25;
 		replacement = random.random01() < 0.25;
