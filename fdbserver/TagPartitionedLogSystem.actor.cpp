@@ -491,15 +491,21 @@ ACTOR Future<Void> TagPartitionedLogSystem::onError_internal(TagPartitionedLogSy
 					changes.push_back(t->onChange());
 				}
 			}
-			for (const auto& worker : it->backupWorkers) {
-				if (worker->get().present()) {
-					backupFailed.push_back(
-					    waitFailureClient(worker->get().interf().waitFailure,
-					                      SERVER_KNOBS->BACKUP_TIMEOUT,
-					                      -SERVER_KNOBS->BACKUP_TIMEOUT / SERVER_KNOBS->SECONDS_BEFORE_NO_FAILURE_DELAY,
-					                      /*trace=*/true));
-				} else {
-					changes.push_back(worker->onChange());
+			if (!self->recoveryCompleteWrittenToCoreState.get()) {
+				// A current backup worker is part of recovery until the transaction
+				// system is fully recovered. After that point, losing one can stall
+				// backup progress, but it is not a transaction-system failure and must
+				// not create another recovery generation.
+				for (const auto& worker : it->backupWorkers) {
+					if (worker->get().present()) {
+						backupFailed.push_back(waitFailureClient(worker->get().interf().waitFailure,
+						                                         SERVER_KNOBS->BACKUP_TIMEOUT,
+						                                         -SERVER_KNOBS->BACKUP_TIMEOUT /
+						                                             SERVER_KNOBS->SECONDS_BEFORE_NO_FAILURE_DELAY,
+						                                         /*trace=*/true));
+					} else {
+						changes.push_back(worker->onChange());
+					}
 				}
 			}
 		}
