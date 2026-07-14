@@ -1098,9 +1098,14 @@ public:
 		// Set up tss fault injection here, only if we are in simulated mode and with fault injection.
 		// With fault injection enabled, the tss will start acting normal for a bit, then after the specified delay
 		// start behaving incorrectly.
-		if (g_network->isSimulated() && !g_simulator->speedUpSimulation &&
+		if (g_network->isSimulated() &&
+		    (!g_simulator->speedUpSimulation || fdbSimulationPolicyState().tssFaultInjectDelay.present()) &&
 		    simulationPolicyHasCapability(ISimulationPolicy::Capability::StorageReplicaFaultInjection)) {
-			tssFaultInjectTime = now() + deterministicRandom()->randomInt(60, 300);
+			if (fdbSimulationPolicyState().tssFaultInjectDelay.present()) {
+				tssFaultInjectTime = now() + fdbSimulationPolicyState().tssFaultInjectDelay.get();
+			} else {
+				tssFaultInjectTime = now() + deterministicRandom()->randomInt(60, 300);
+			}
 			TraceEvent(SevWarnAlways, "TSSInjectFaultEnabled", thisServerID)
 			    .detail("Mode", static_cast<int>(fdbSimulationPolicyState().tssMode))
 			    .detail("At", tssFaultInjectTime.get());
@@ -9857,7 +9862,7 @@ Future<Void> update(StorageServer* data, bool* pReceivedUpdate) {
 					    data->tssFaultInjectTime.present() && data->tssFaultInjectTime.get() < now() &&
 					    (msg.type == MutationRef::SetValue || msg.type == MutationRef::ClearRange) &&
 					    (msg.param1.size() < 2 || msg.param1[0] != 0xff || msg.param1[1] != 0xff) &&
-					    deterministicRandom()->random01() < 0.05) {
+					    deterministicRandom()->random01() < fdbSimulationPolicyState().tssMutationDropProbability) {
 						TraceEvent(SevWarnAlways, "TSSInjectDropMutation", data->thisServerID)
 						    .detail("Mutation", msg)
 						    .detail("Version", cloneCursor2->version().toString());
@@ -10699,7 +10704,8 @@ void setAvailableStatus(StorageServer* self, KeyRangeRef keys, bool available) {
 		    mLV, MutationRef(MutationRef::SetValue, availableKeys.end, endAvailable ? "1"_sr : "0"_sr));
 	}
 
-	if (buggify()) {
+	if (buggify() || (g_network->isSimulated() &&
+	                  fdbSimulationPolicyState().injectTargetedSSRestartTime != std::numeric_limits<double>::max())) {
 		self->maybeInjectTargetedRestart(logV);
 	}
 }
@@ -10753,7 +10759,8 @@ void setAssignedStatus(StorageServer* self, KeyRangeRef keys, bool nowAssigned) 
 		    mLV, MutationRef(MutationRef::SetValue, assignedKeys.end, endAssigned ? "1"_sr : "0"_sr));
 	}
 
-	if (buggify()) {
+	if (buggify() || (g_network->isSimulated() &&
+	                  fdbSimulationPolicyState().injectTargetedSSRestartTime != std::numeric_limits<double>::max())) {
 		self->maybeInjectTargetedRestart(logV);
 	}
 }
@@ -10773,7 +10780,8 @@ void setRangeBasedBulkLoadStatus(StorageServer* self, KeyRangeRef keys, const SS
 		    mLV, MutationRef(MutationRef::SetValue, dataMoveKeys.end, ssBulkLoadMetadataValue(endBulkLoadMetadata)));
 	}
 	self->ssBulkLoadMetadataMap.insert(keys, ssBulkLoadMetadata);
-	if (buggify()) {
+	if (buggify() || (g_network->isSimulated() &&
+	                  fdbSimulationPolicyState().injectTargetedSSRestartTime != std::numeric_limits<double>::max())) {
 		self->maybeInjectTargetedRestart(logV);
 	}
 }

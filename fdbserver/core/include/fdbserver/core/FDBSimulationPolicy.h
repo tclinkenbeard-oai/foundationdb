@@ -89,6 +89,8 @@ struct FDBSimulationPolicyState {
 	Optional<std::pair<UID, NetworkAddress>> consistencyScanCorruptor;
 	double injectTargetedSSRestartTime = std::numeric_limits<double>::max();
 	double injectSSDelayTime = std::numeric_limits<double>::max();
+	Optional<double> tssFaultInjectDelay;
+	double tssMutationDropProbability = 0.05;
 	std::map<NetworkAddress, bool> corruptWorkerMap;
 	FDBTSSMode tssMode = FDBTSSMode::Disabled;
 

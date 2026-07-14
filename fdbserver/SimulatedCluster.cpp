@@ -454,6 +454,8 @@ public:
 
 	bool injectTargetedSSRestart = false;
 	bool injectSSDelay = false;
+	Optional<double> injectTargetedSSRestartTime, injectSSDelayTime, tssFaultInjectDelay, tssMutationDropProbability;
+	bool injectTssMutationDrop = false;
 	std::string testClass; // unused -- used in TestHarness
 	float testPriority; // unused -- used in TestHarness
 
@@ -529,6 +531,11 @@ public:
 		    .add("randomlyRenameZoneId", &randomlyRenameZoneId)
 		    .add("injectTargetedSSRestart", &injectTargetedSSRestart)
 		    .add("injectSSDelay", &injectSSDelay)
+		    .add("injectTargetedSSRestartTime", &injectTargetedSSRestartTime)
+		    .add("injectSSDelayTime", &injectSSDelayTime)
+		    .add("injectTssMutationDrop", &injectTssMutationDrop)
+		    .add("tssFaultInjectDelay", &tssFaultInjectDelay)
+		    .add("tssMutationDropProbability", &tssMutationDropProbability)
 		    .add("longRunningTest", &longRunningTest)
 		    .add("simulationNormalRunTestsTimeoutSeconds", &simulationNormalRunTestsTimeoutSeconds)
 		    .add("simulationBuggifyRunTestsTimeoutSeconds", &simulationBuggifyRunTestsTimeoutSeconds)
@@ -2137,9 +2144,11 @@ void SimulationConfig::setProcessesPerMachine(const TestConfig& testConfig) {
 // Sets the TSS configuration based on the testConfig.
 // Also configures the cluster behaviour through setting some flags on the simulator.
 void SimulationConfig::setTss(const TestConfig& testConfig) {
-	int tssCount = 0;
+	ASSERT(!testConfig.injectTssMutationDrop || (!testConfig.disableTss && !testConfig.config.present()));
+	int tssCount = testConfig.injectTssMutationDrop ? 1 : 0;
 	// TODO: Support TSS in SHARD_ENCODE_LOCATION_METADATA mode.
-	if (!testConfig.simpleConfig && !testConfig.disableTss && deterministicRandom()->random01() < 0.25) {
+	if (!testConfig.injectTssMutationDrop && !testConfig.simpleConfig && !testConfig.disableTss &&
+	    deterministicRandom()->random01() < 0.25) {
 		// 1 or 2 tss
 		tssCount = deterministicRandom()->randomInt(1, 3);
 	}
@@ -2147,21 +2156,26 @@ void SimulationConfig::setTss(const TestConfig& testConfig) {
 	// reduce tss to half of extra non-seed servers that can be recruited in usable regions.
 	tssCount =
 	    std::max(0, std::min(tssCount, db.usableRegions * ((machine_count / datacenters) - db.storageTeamSize) / 2));
+	ASSERT(!testConfig.injectTssMutationDrop || tssCount > 0);
 
 	if (!testConfig.config.present() && tssCount > 0) {
 		std::string confStr = format("tss_count:=%d tss_storage_engine:=%d", tssCount, db.storageServerStoreType);
 		set_config(confStr);
-		double tssRandom = deterministicRandom()->random01();
-		if (tssRandom > 0.5 || !faultInjectionActivated) {
-			// normal tss mode
-			fdbSimulationPolicyState().tssMode = FDBTSSMode::EnabledNormal;
-		} else if (tssRandom < 0.25 && !testConfig.isFirstTestInRestart) {
-			// fault injection - don't enable in first test in restart because second test won't know it intentionally
-			// lost data
+		if (testConfig.injectTssMutationDrop) {
 			fdbSimulationPolicyState().tssMode = FDBTSSMode::EnabledDropMutations;
 		} else {
-			// delay injection
-			fdbSimulationPolicyState().tssMode = FDBTSSMode::EnabledAddDelay;
+			double tssRandom = deterministicRandom()->random01();
+			if (tssRandom > 0.5 || !faultInjectionActivated) {
+				// normal tss mode
+				fdbSimulationPolicyState().tssMode = FDBTSSMode::EnabledNormal;
+			} else if (tssRandom < 0.25 && !testConfig.isFirstTestInRestart) {
+				// fault injection - don't enable in first test in restart because second test won't know it
+				// intentionally lost data
+				fdbSimulationPolicyState().tssMode = FDBTSSMode::EnabledDropMutations;
+			} else {
+				// delay injection
+				fdbSimulationPolicyState().tssMode = FDBTSSMode::EnabledAddDelay;
+			}
 		}
 		printf("enabling tss for simulation in mode %d: %s\n",
 		       static_cast<int>(fdbSimulationPolicyState().tssMode),
@@ -2749,13 +2763,30 @@ static Future<Void> simulationSetupAndRunImpl(std::string dataFolder,
 	testConfig.readFromConfig(testFile);
 	fdbSimulationPolicyState().hasDiffProtocolProcess = testConfig.startIncompatibleProcess;
 	fdbSimulationPolicyState().setDiffProtocol = false;
-	if (testConfig.injectTargetedSSRestart && deterministicRandom()->random01() < 0.25) {
-		fdbSimulationPolicyState().injectTargetedSSRestartTime = 60.0 + 340.0 * deterministicRandom()->random01();
+	if (testConfig.injectTargetedSSRestart) {
+		if (testConfig.injectTargetedSSRestartTime.present()) {
+			ASSERT(testConfig.injectTargetedSSRestartTime.get() >= 0.0);
+			fdbSimulationPolicyState().injectTargetedSSRestartTime = testConfig.injectTargetedSSRestartTime.get();
+		} else if (deterministicRandom()->random01() < 0.25) {
+			fdbSimulationPolicyState().injectTargetedSSRestartTime = 60.0 + 340.0 * deterministicRandom()->random01();
+		}
 	}
 
-	if (testConfig.injectSSDelay && deterministicRandom()->random01() < 0.25) {
-		fdbSimulationPolicyState().injectSSDelayTime = 60.0 + 240.0 * deterministicRandom()->random01();
+	if (testConfig.injectSSDelay) {
+		if (testConfig.injectSSDelayTime.present()) {
+			ASSERT(testConfig.injectSSDelayTime.get() >= 0.0);
+			fdbSimulationPolicyState().injectSSDelayTime = testConfig.injectSSDelayTime.get();
+		} else if (deterministicRandom()->random01() < 0.25) {
+			fdbSimulationPolicyState().injectSSDelayTime = 60.0 + 240.0 * deterministicRandom()->random01();
+		}
 	}
+
+	fdbSimulationPolicyState().tssFaultInjectDelay = testConfig.tssFaultInjectDelay;
+	ASSERT(!fdbSimulationPolicyState().tssFaultInjectDelay.present() ||
+	       fdbSimulationPolicyState().tssFaultInjectDelay.get() >= 0.0);
+	fdbSimulationPolicyState().tssMutationDropProbability = testConfig.tssMutationDropProbability.orDefault(0.05);
+	ASSERT(fdbSimulationPolicyState().tssMutationDropProbability >= 0.0 &&
+	       fdbSimulationPolicyState().tssMutationDropProbability <= 1.0);
 
 	// Build simulator allow list
 	allowList.addTrustedSubnet("0.0.0.0/2"sv);
