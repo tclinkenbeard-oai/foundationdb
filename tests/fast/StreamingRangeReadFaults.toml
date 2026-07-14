@@ -1,0 +1,41 @@
+[configuration]
+singleRegion = true
+generateFearless = false
+datacenters = 1
+minimumReplication = 3
+machineCount = 12
+storageEngineExcludeTypes = ["ssd-sharded-rocksdb"]
+buggify = false
+faultInjection = true
+injectTargetedSSRestart = true
+injectSSDelay = true
+injectTssMutationDrop = true
+tssFaultInjectDelay = 10.0
+tssMutationDropProbability = 1.0
+
+[[knobs]]
+shard_encode_location_metadata = false
+enable_dd_physical_shard = false
+storage_recruitment_delay = 1.0
+tss_recruitment_timeout = 15.0
+tss_dd_check_interval = 1.0
+min_shard_bytes = 10000
+shard_bytes_per_sqrt_bytes = 0
+load_balance_tss_mismatch_trace_full = false
+quarantine_tss_on_mismatch = true
+
+[[test]]
+testTitle = 'StreamingRangeReadFaults'
+waitForQuiescenceEnd = false
+runFailureWorkloads = false
+
+    [[test.workload]]
+    testName = 'StreamingRangeRead'
+    nodeCount = 20000
+    valueBytes = 128
+    testDuration = 120.0
+    performWrites = true
+    writeInterval = 0.01
+    targetedSSRestartDelay = 35.0
+    ssDelayDelay = 50.0
+    requireTssMismatch = true
