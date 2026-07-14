@@ -25,6 +25,7 @@
 #include "fdbclient/SystemData.h"
 #include "fdbclient/SimpleIni.h"
 #include "fdbserver/core/Knobs.h"
+#include "fdbserver/core/QuietDatabase.h"
 #include "fdbserver/core/TesterInterface.h"
 #include "fdbserver/core/WorkerInterface.actor.h"
 #include "fdbserver/core/FDBSimulationPolicy.h"
@@ -46,6 +47,10 @@ public: // variables
 	int retryLimit; // -1 if no limit
 	bool snapSucceeded = false; // When taking snapshot, tracks snapshot success
 	bool attemptDuplicateSnapshot = false;
+	double duplicateSnapshotDelay; // -1 chooses a random delay before the duplicate request
+	bool requireDuplicateSnapshot;
+	bool checkFinishedDuplicateSnapshot;
+	bool checkWorkerDuplicateSnapshot;
 
 public: // ctor & dtor
 	explicit SnapTestWorkload(WorkloadContext const& wcx)
@@ -60,6 +65,10 @@ public: // ctor & dtor
 		restartInfoLocation = getOption(options, "restartInfoLocation"_sr, "simfdb/restartInfo.ini"_sr).toString();
 		// default behavior is to retry until success
 		retryLimit = getOption(options, "retryLimit"_sr, -1);
+		duplicateSnapshotDelay = getOption(options, "duplicateSnapshotDelay"_sr, -1.0);
+		requireDuplicateSnapshot = getOption(options, "requireDuplicateSnapshot"_sr, false);
+		checkFinishedDuplicateSnapshot = getOption(options, "checkFinishedDuplicateSnapshot"_sr, false);
+		checkWorkerDuplicateSnapshot = getOption(options, "checkWorkerDuplicateSnapshot"_sr, false);
 		fdbSimulationPolicyState().allowLogSetKills = false;
 		{
 			double duplicateSnapshotProbability = getOption(options, "duplicateSnapshotProbability"_sr, 0.1);
@@ -146,6 +155,40 @@ public: // workload functions
 		}
 	}
 
+	Future<Void> checkWorkerDuplicates(Database cx, StringRef snapCmd) {
+		std::vector<WorkerDetails> workers = co_await getWorkers(dbInfo);
+		std::vector<StorageServerInterface> storageServers = co_await getStorageServers(cx);
+		ASSERT(!storageServers.empty());
+
+		Optional<WorkerInterface> storageWorker;
+		for (auto const& worker : workers) {
+			for (auto const& storage : storageServers) {
+				if (worker.interf.address() == storage.address()) {
+					storageWorker = worker.interf;
+					break;
+				}
+			}
+			if (storageWorker.present()) {
+				break;
+			}
+		}
+		ASSERT(storageWorker.present());
+
+		UID workerSnapUID = deterministicRandom()->randomUniqueID();
+		Future<Void> first =
+		    storageWorker.get().workerSnapReq.getReply(WorkerSnapRequest(snapCmd, workerSnapUID, "storage"_sr));
+		co_await delay(0);
+		Future<Void> replacement =
+		    storageWorker.get().workerSnapReq.getReply(WorkerSnapRequest(snapCmd, workerSnapUID, "storage"_sr));
+		ErrorOr<Void> firstResult = co_await errorOr(first);
+		ASSERT(firstResult.isError());
+		ASSERT_EQ(firstResult.getError().code(), error_code_duplicate_snapshot_request);
+		co_await replacement;
+
+		// A completed direct worker request is also idempotent.
+		co_await storageWorker.get().workerSnapReq.getReply(WorkerSnapRequest(snapCmd, workerSnapUID, "storage"_sr));
+	}
+
 	Future<Void> _start(Database cx) {
 		Transaction tr(cx);
 		bool snapFailed = false;
@@ -170,7 +213,8 @@ public: // workload functions
 
 					Future<Void> status = snapCreate(cx, snapCmdRef, snapUID);
 					if (attemptDuplicateSnapshot) {
-						co_await delay(deterministicRandom()->random01());
+						co_await delay(duplicateSnapshotDelay >= 0 ? duplicateSnapshotDelay
+						                                           : deterministicRandom()->random01());
 						duplicateSnapStatus = snapCreate(cx, snapCmdRef, snapUID);
 					}
 					ErrorOr<Void> statusErr = co_await errorOr(status);
@@ -179,9 +223,21 @@ public: // workload functions
 						// Any other errors should be thrown
 						throw statusErr.getError();
 					}
+					if (requireDuplicateSnapshot) {
+						ASSERT(attemptDuplicateSnapshot);
+						ASSERT(statusErr.isError());
+						ASSERT_EQ(statusErr.getError().code(), error_code_duplicate_snapshot_request);
+					}
 					if (attemptDuplicateSnapshot) {
 						// If duplicate, the first request is discarded, wait for the latest one
 						co_await duplicateSnapStatus;
+					}
+					if (checkFinishedDuplicateSnapshot) {
+						// The completed result must be replayed without creating a second snapshot.
+						co_await snapCreate(cx, snapCmdRef, snapUID);
+					}
+					if (checkWorkerDuplicateSnapshot) {
+						co_await checkWorkerDuplicates(cx, snapCmdRef);
 					}
 					break;
 				} catch (Error& e) {
