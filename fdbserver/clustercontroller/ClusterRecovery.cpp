@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -27,6 +28,7 @@
 #include "fdbserver/core/BackupProgress.h"
 #include "ClusterRecovery.h"
 #include "fdbserver/core/Knobs.h"
+#include "fdbserver/core/ProcessClassRecruitment.h"
 #include "fdbserver/core/MasterInterface.h"
 #include "fdbserver/core/SeedShardServers.h"
 #include "fdbserver/core/WaitFailure.h"
@@ -34,6 +36,7 @@
 #include "flow/Error.h"
 #include "flow/ProtocolVersion.h"
 #include "flow/Trace.h"
+#include "flow/UnitTest.h"
 
 #include "flow/CoroUtils.h"
 
@@ -45,6 +48,7 @@ static std::set<int> const& normalClusterRecoveryErrors() {
 		s.insert(error_code_tlog_failed);
 		s.insert(error_code_commit_proxy_failed);
 		s.insert(error_code_grv_proxy_failed);
+		s.insert(error_code_cdc_proxy_failed);
 		s.insert(error_code_resolver_failed);
 		s.insert(error_code_backup_worker_failed);
 		s.insert(error_code_recruitment_failed);
@@ -84,13 +88,14 @@ Future<Void> recruitNewMaster(ClusterControllerData* cluster,
 		std::map<Optional<Standalone<StringRef>>, int> id_used;
 		id_used[cluster->clusterControllerProcessId]++;
 		masterWorker = cluster->getWorkerForRoleInDatacenter(
-		    cluster->clusterControllerDcId, ProcessClass::Master, ProcessClass::NeverAssign, db->config, id_used);
-		if ((masterWorker.worker.processClass.machineClassFitness(ProcessClass::Master) >
+		    cluster->clusterControllerDcId, recruitment::Master, recruitment::NeverAssign, db->config, id_used);
+		if ((recruitment::machineClassFitness(masterWorker.worker.processClass, recruitment::Master) >
 		         SERVER_KNOBS->EXPECTED_MASTER_FITNESS ||
 		     masterWorker.worker.interf.locality.processId() == cluster->clusterControllerProcessId) &&
 		    !cluster->goodRecruitmentTime.isReady()) {
 			TraceEvent("RecruitNewMaster", cluster->id)
-			    .detail("Fitness", masterWorker.worker.processClass.machineClassFitness(ProcessClass::Master));
+			    .detail("Fitness",
+			            recruitment::machineClassFitness(masterWorker.worker.processClass, recruitment::Master));
 			co_await delay(SERVER_KNOBS->ATTEMPT_RECRUITMENT_DELAY);
 			continue;
 		}
@@ -229,6 +234,73 @@ Future<Void> newGrvProxies(Reference<ClusterRecoveryData> self, RecruitFromConfi
 	std::vector<GrvProxyInterface> newRecruits = co_await getAll(initializationReplies);
 	TraceEvent("GrvProxyInitializationComplete", self->dbgid).log();
 	self->grvProxies = std::move(newRecruits);
+}
+
+bool shouldRecruitCDCProxies(bool nativeCdcEnabled, bool hasDurableCdcState) {
+	return nativeCdcEnabled || hasDurableCdcState;
+}
+
+Future<Void> ensureCDCProxies(Reference<ClusterRecoveryData> self, RecruitFromConfigurationReply recr) {
+	const bool hasDurableCdcState = !(co_await self->txnStateStore->readRange(cdcStreamKeys)).empty() ||
+	                                !(co_await self->txnStateStore->readRange(cdcRetiredTagPopKeys)).empty();
+	if (!shouldRecruitCDCProxies(CLIENT_KNOBS->ENABLE_NATIVE_CDC, hasDurableCdcState)) {
+		CODE_PROBE(true, "Recovery skips CDC proxies when disabled with no durable state");
+		self->controllerData->db.cdcProxies.clear();
+		co_return;
+	}
+	CODE_PROBE(!CLIENT_KNOBS->ENABLE_NATIVE_CDC && hasDurableCdcState,
+	           "Recovery recruits CDC proxies to drain disabled durable state");
+	auto& cdcProxies = self->controllerData->db.cdcProxies;
+	const size_t reusedCount = cdcProxies.size();
+	if (reusedCount > 0) {
+		CODE_PROBE(true, "Recovery reuses CDC proxies while CDC state remains durable");
+		TraceEvent("CDCProxiesReused", self->dbgid).detail("Count", reusedCount);
+	}
+	const size_t targetCount = recr.grvProxies.size();
+	if (reusedCount >= targetCount) {
+		co_return;
+	}
+
+	std::vector<Future<CDCProxyInterface>> initializationReplies;
+	for (const auto& grvProxy : recr.grvProxies) {
+		if (reusedCount + initializationReplies.size() >= targetCount) {
+			break;
+		}
+		const Optional<Key> grvProcessId = grvProxy.locality.processId();
+		ASSERT(grvProcessId.present());
+		const bool alreadyHostsCDCProxy =
+		    std::any_of(cdcProxies.begin(), cdcProxies.end(), [&](const CDCProxyInterface& cdcProxy) {
+			    return cdcProxy.processId.present() && cdcProxy.processId.get() == grvProcessId.get();
+		    });
+		if (alreadyHostsCDCProxy) {
+			continue;
+		}
+		InitializeCDCProxyRequest req;
+		req.recoveryCount = self->cstate.myDBState.recoveryCount + 1;
+		TraceEvent("CDCProxyReplies", self->dbgid).detail("WorkerID", grvProxy.id());
+		initializationReplies.push_back(
+		    transformErrors(throwErrorOr(grvProxy.cdcProxy.getReplyUnlessFailedFor(
+		                        req, SERVER_KNOBS->TLOG_TIMEOUT, SERVER_KNOBS->MASTER_FAILURE_SLOPE_DURING_RECOVERY)),
+		                    cdc_proxy_failed()));
+	}
+
+	std::vector<CDCProxyInterface> newRecruits = co_await getAll(initializationReplies);
+	ASSERT_EQ(reusedCount + newRecruits.size(), targetCount);
+	TraceEvent("CDCProxyInitializationComplete", self->dbgid)
+	    .detail("Count", newRecruits.size())
+	    .detail("ReusedCount", reusedCount)
+	    .detail("TotalCount", targetCount);
+	CODE_PROBE(reusedCount > 0, "Recovery expands retained CDC proxies to match GRV proxy count");
+	cdcProxies.insert(cdcProxies.end(), newRecruits.begin(), newRecruits.end());
+	self->registrationTrigger.trigger();
+}
+
+TEST_CASE("/NativeCDC/RecoveryRecruitment") {
+	ASSERT_EQ(shouldRecruitCDCProxies(true, false), true);
+	ASSERT_EQ(shouldRecruitCDCProxies(true, true), true);
+	ASSERT_EQ(shouldRecruitCDCProxies(false, false), false);
+	ASSERT_EQ(shouldRecruitCDCProxies(false, true), true);
+	return Void();
 }
 
 Future<Void> newResolvers(Reference<ClusterRecoveryData> self, RecruitFromConfigurationReply recr) {
@@ -869,6 +941,7 @@ void sendMasterRegistration(ClusterRecoveryData* self,
                             LogSystemConfig const& logSystemConfig,
                             std::vector<CommitProxyInterface> commitProxies,
                             std::vector<GrvProxyInterface> grvProxies,
+                            std::vector<CDCProxyInterface> cdcProxies,
                             std::vector<ResolverInterface> resolvers,
                             DBRecoveryCount recoveryCount,
                             std::vector<UID> priorCommittedLogServers) {
@@ -878,6 +951,7 @@ void sendMasterRegistration(ClusterRecoveryData* self,
 	masterReq.logSystemConfig = logSystemConfig;
 	masterReq.commitProxies = commitProxies;
 	masterReq.grvProxies = grvProxies;
+	masterReq.cdcProxies = cdcProxies;
 	masterReq.resolvers = resolvers;
 	masterReq.recoveryCount = recoveryCount;
 	if (self->hasConfiguration)
@@ -916,6 +990,7 @@ Future<Void> updateRegistration(Reference<ClusterRecoveryData> self, Reference<L
 			                       logSystemConfig,
 			                       self->provisionalCommitProxies,
 			                       self->provisionalGrvProxies,
+			                       self->controllerData->db.cdcProxies,
 			                       self->resolvers,
 			                       self->cstate.myDBState.recoveryCount,
 			                       self->cstate.prevDBState.getPriorCommittedLogServers());
@@ -925,6 +1000,7 @@ Future<Void> updateRegistration(Reference<ClusterRecoveryData> self, Reference<L
 			                       logSystemConfig,
 			                       self->commitProxies,
 			                       self->grvProxies,
+			                       self->controllerData->db.cdcProxies,
 			                       self->resolvers,
 			                       self->cstate.myDBState.recoveryCount,
 			                       std::vector<UID>());
@@ -1212,6 +1288,7 @@ Future<std::vector<Standalone<CommitTransactionRef>>> recruitEverything(
 	Future<Void> txnSystemInitialized =
 	    traceAfter(newCommitProxies(self, recruits), "CommitProxiesInitialized") &&
 	    traceAfter(newGrvProxies(self, recruits), "GRVProxiesInitialized") &&
+	    traceAfter(ensureCDCProxies(self, recruits), "CDCProxiesAvailable") &&
 	    traceAfter(newResolvers(self, recruits), "ResolversInitialized") &&
 	    traceAfter(newTLogServers(self, recruits, oldLogSystem, &confChanges), "TLogServersInitialized");
 	co_await (txnSystemInitialized || monitorInitializingTxnSystem(self->controllerData->db.unfinishedRecoveries));
@@ -1367,6 +1444,27 @@ Future<Void> readTransactionSystemState(Reference<ClusterRecoveryData> self,
 	RangeResult rawHistoryTags = co_await self->txnStateStore->readRange(serverTagHistoryKeys);
 	for (auto& kv : rawHistoryTags) {
 		self->allTags.push_back(decodeServerTagValue(kv.value));
+	}
+
+	std::set<CDCStreamId> activeCdcStreams;
+	RangeResult rawCdcStreams = co_await self->txnStateStore->readRange(cdcStreamKeys);
+	for (auto& kv : rawCdcStreams) {
+		activeCdcStreams.insert(decodeCDCStreamKey(kv.key));
+	}
+
+	RangeResult rawCdcHistoryTags = co_await self->txnStateStore->readRange(cdcTagHistoryKeys);
+	for (auto& kv : rawCdcHistoryTags) {
+		const CDCTagHistoryEntry tagHistory = decodeCDCTagHistoryKey(kv.key);
+		if (activeCdcStreams.contains(tagHistory.streamId)) {
+			self->allTags.push_back(tagHistory.tag);
+		}
+	}
+
+	// Final pops are durable recovery work. Preserve their tags even after the
+	// corresponding active stream history has been removed.
+	RangeResult rawRetiredCdcTags = co_await self->txnStateStore->readRange(cdcRetiredTagPopKeys);
+	for (auto& kv : rawRetiredCdcTags) {
+		self->allTags.push_back(decodeCDCRetiredTagPopKey(kv.key));
 	}
 
 	uniquify(self->allTags);

@@ -26,10 +26,11 @@
 #include "fdbclient/IClientApi.h"
 #include "fdbclient/ManagementAPI.h"
 #include "fdbclient/Schemas.h"
+#include "fdbclient/StatusSchema.h"
 
 #include "flow/Arena.h"
 #include "flow/FastRef.h"
-#include "flow/ThreadHelper.actor.h"
+#include "flow/ThreadHelper.h"
 namespace fdb_cli {
 
 Future<bool> fileConfigureCommandActor(Reference<IDatabase> db,

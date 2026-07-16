@@ -19,6 +19,7 @@
  */
 
 #include "fdbserver/core/Knobs.h"
+#include "fdbserver/core/ProcessClassRecruitment.h"
 #include "fdbclient/Knobs.h"
 #include "flow/IRandom.h"
 
@@ -175,6 +176,18 @@ void ServerKnobs::initialize(Randomize randomize, ClientKnobs* clientKnobs, IsSi
 	init( DESIRED_UPDATE_BYTES,                2*DESIRED_TOTAL_BYTES );
 	init( UPDATE_DELAY,                                        0.001 );
 	init( MAXIMUM_PEEK_BYTES,                                   10e6 );
+	init( CDC_PROXY_CONSUME_REPLY_BYTES,                         10e6 );
+	init( CDC_PROXY_BUFFER_BYTES,                                1e9 );
+	if (randomize && buggify()) {
+		MAXIMUM_PEEK_BYTES = 5000;
+		CDC_PROXY_CONSUME_REPLY_BYTES = 5000;
+		CDC_PROXY_BUFFER_BYTES = 10000;
+	}
+	init( CDC_PROXY_CONSUME_POLL_TIMEOUT,                         5.0 ); if( randomize && buggify() ) CDC_PROXY_CONSUME_POLL_TIMEOUT = 0.1;
+	init( CDC_PROXY_FAILURE_TIMEOUT,                              0.4 );
+	init( CDC_PROXY_FAILURE_COALESCE_DELAY,                       0.0 );
+	init( CDC_PROXY_POP_MIN_INTERVAL,                             0.1 ); if( randomize && buggify() ) CDC_PROXY_POP_MIN_INTERVAL = 0.01;
+	init( CDC_PROXY_POP_SCAN_INTERVAL,                            5.0 ); if( randomize && buggify() ) CDC_PROXY_POP_SCAN_INTERVAL = 0.1;
 	init( APPLY_MUTATION_BYTES,                                  1e6 );
 	init( BUGGIFY_RECOVER_MEMORY_LIMIT,                          1e6 );
 	init( BUGGIFY_WORKER_REMOVED_MAX_LAG,                         30 );
@@ -311,7 +324,7 @@ void ServerKnobs::initialize(Randomize randomize, ClientKnobs* clientKnobs, IsSi
 	init( CPU_PIVOT_RATIO,                                     0.9 );
 	// In order to make sure GetTeam has enough eligible destination team:
 	ASSERT_GT(AVAILABLE_SPACE_PIVOT_RATIO + CPU_PIVOT_RATIO, 1.0 );
-	// In simulation, the CPU percent of every storage server is hard-coded as 100.0%. It is difficult to test pivot CPU in normal simulation. TODO: add mock DD Test case for it.
+	// In simulation, storage-server CPU is hard-coded as 100.0%. GetTeam/CutOffByCpu provides focused pivot coverage.
 	// TODO: choose a meaning value for real cluster
 	init( MAX_DEST_CPU_PERCENT, 		  					   100.0 );
 	init( DD_TEAM_PIVOT_UPDATE_DELAY,                            5.0 );
@@ -982,12 +995,12 @@ void ServerKnobs::initialize(Randomize randomize, ClientKnobs* clientKnobs, IsSi
 	init( CLUSTER_HEALTH_METRIC_RK_CRITICAL_RELEASED_TPS_RATIO_THRESHOLD, 1.2 );
 
 	init( INCOMPATIBLE_PEERS_LOGGING_INTERVAL,                   600 ); if( randomize && buggify() ) INCOMPATIBLE_PEERS_LOGGING_INTERVAL = 60.0;
-	init( EXPECTED_MASTER_FITNESS,            ProcessClass::UnsetFit );
-	init( EXPECTED_TLOG_FITNESS,              ProcessClass::UnsetFit );
-	init( EXPECTED_LOG_ROUTER_FITNESS,        ProcessClass::UnsetFit );
-	init( EXPECTED_COMMIT_PROXY_FITNESS,      ProcessClass::UnsetFit );
-	init( EXPECTED_GRV_PROXY_FITNESS,         ProcessClass::UnsetFit );
-	init( EXPECTED_RESOLVER_FITNESS,          ProcessClass::UnsetFit );
+	init( EXPECTED_MASTER_FITNESS,            recruitment::UnsetFit );
+	init( EXPECTED_TLOG_FITNESS,              recruitment::UnsetFit );
+	init( EXPECTED_LOG_ROUTER_FITNESS,        recruitment::UnsetFit );
+	init( EXPECTED_COMMIT_PROXY_FITNESS,      recruitment::UnsetFit );
+	init( EXPECTED_GRV_PROXY_FITNESS,         recruitment::UnsetFit );
+	init( EXPECTED_RESOLVER_FITNESS,          recruitment::UnsetFit );
 	init( RECRUITMENT_TIMEOUT,                                   600 ); if( randomize && buggify() ) RECRUITMENT_TIMEOUT = deterministicRandom()->coinflip() ? 60.0 : 1.0;
 
 	init( POLICY_RATING_TESTS,                                   200 ); if( randomize && buggify() ) POLICY_RATING_TESTS = 20;
