@@ -61,9 +61,9 @@ struct CoreTLogSet {
 	    startVersion(invalidVersion) {}
 	bool operator==(CoreTLogSet const& rhs) const {
 		return tLogs == rhs.tLogs && tLogWriteAntiQuorum == rhs.tLogWriteAntiQuorum &&
-		       tLogReplicationFactor == rhs.tLogReplicationFactor && isLocal == rhs.isLocal &&
-		       satelliteTagLocations == rhs.satelliteTagLocations && locality == rhs.locality &&
-		       startVersion == rhs.startVersion &&
+		       tLogReplicationFactor == rhs.tLogReplicationFactor && tLogLocalities == rhs.tLogLocalities &&
+		       isLocal == rhs.isLocal && satelliteTagLocations == rhs.satelliteTagLocations &&
+		       locality == rhs.locality && startVersion == rhs.startVersion &&
 		       ((!tLogPolicy && !rhs.tLogPolicy) ||
 		        (tLogPolicy && rhs.tLogPolicy && (tLogPolicy->info() == rhs.tLogPolicy->info())));
 	}

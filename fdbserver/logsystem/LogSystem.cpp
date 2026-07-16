@@ -191,15 +191,21 @@ TLogSet toTLogSet(const LogSet& rhs) {
 	TLogSet result;
 	result.tLogWriteAntiQuorum = rhs.tLogWriteAntiQuorum;
 	result.tLogReplicationFactor = rhs.tLogReplicationFactor;
-	result.tLogLocalities = rhs.tLogLocalities;
+	result.tLogLocalities = rhs.tLogExclusionLocalities.empty() ? rhs.tLogLocalities : rhs.tLogExclusionLocalities;
 	result.tLogVersion = rhs.tLogVersion;
 	result.tLogPolicy = rhs.tLogPolicy;
 	result.isLocal = rhs.isLocal;
 	result.locality = rhs.locality;
 	result.startVersion = rhs.startVersion;
 	result.satelliteTagLocations = rhs.satelliteTagLocations;
-	for (const auto& tlog : rhs.logServers) {
-		result.tLogs.push_back(tlog->get());
+	ASSERT(rhs.logServers.size() == rhs.tLogLocalities.size());
+	ASSERT(rhs.tLogExclusionLocalities.empty() || rhs.logServers.size() == rhs.tLogExclusionLocalities.size());
+	for (int i = 0; i < rhs.logServers.size(); i++) {
+		const auto& tlog = rhs.logServers[i]->get();
+		result.tLogs.push_back(tlog);
+		if (tlog.present()) {
+			result.tLogLocalities[i] = tlog.interf().filteredLocality;
+		}
 	}
 	for (const auto& logRouter : rhs.logRouters) {
 		result.logRouters.push_back(logRouter->get());
@@ -214,15 +220,22 @@ CoreTLogSet toCoreTLogSet(const LogSet& logset) {
 	CoreTLogSet result;
 	result.tLogWriteAntiQuorum = logset.tLogWriteAntiQuorum;
 	result.tLogReplicationFactor = logset.tLogReplicationFactor;
-	result.tLogLocalities = logset.tLogLocalities;
+	result.tLogLocalities =
+	    logset.tLogExclusionLocalities.empty() ? logset.tLogLocalities : logset.tLogExclusionLocalities;
 	result.tLogPolicy = logset.tLogPolicy;
 	result.isLocal = logset.isLocal;
 	result.locality = logset.locality;
 	result.startVersion = logset.startVersion;
 	result.satelliteTagLocations = logset.satelliteTagLocations;
 	result.tLogVersion = logset.tLogVersion;
-	for (const auto& log : logset.logServers) {
-		result.tLogs.push_back(log->get().id());
+	ASSERT(logset.logServers.size() == logset.tLogLocalities.size());
+	ASSERT(logset.tLogExclusionLocalities.empty() || logset.logServers.size() == logset.tLogExclusionLocalities.size());
+	for (int i = 0; i < logset.logServers.size(); i++) {
+		const auto& log = logset.logServers[i]->get();
+		result.tLogs.push_back(log.id());
+		if (log.present()) {
+			result.tLogLocalities[i] = log.interf().filteredLocality;
+		}
 	}
 	return result;
 }
@@ -298,8 +311,9 @@ Future<Version> minVersionWhenReady(Future<Void> f, std::vector<std::pair<UID, F
 
 LogSet::LogSet(const TLogSet& tLogSet)
   : tLogWriteAntiQuorum(tLogSet.tLogWriteAntiQuorum), tLogReplicationFactor(tLogSet.tLogReplicationFactor),
-    tLogLocalities(tLogSet.tLogLocalities), tLogVersion(tLogSet.tLogVersion), tLogPolicy(tLogSet.tLogPolicy),
-    isLocal(tLogSet.isLocal), locality(tLogSet.locality), startVersion(tLogSet.startVersion),
+    tLogLocalities(tLogSet.tLogLocalities), tLogExclusionLocalities(tLogSet.tLogLocalities),
+    tLogVersion(tLogSet.tLogVersion), tLogPolicy(tLogSet.tLogPolicy), isLocal(tLogSet.isLocal),
+    locality(tLogSet.locality), startVersion(tLogSet.startVersion),
     satelliteTagLocations(tLogSet.satelliteTagLocations) {
 	for (const auto& log : tLogSet.tLogs) {
 		logServers.push_back(makeReference<AsyncVar<OptionalInterface<TLogInterface>>>(log));
@@ -316,8 +330,9 @@ LogSet::LogSet(const TLogSet& tLogSet)
 
 LogSet::LogSet(const CoreTLogSet& coreSet)
   : tLogWriteAntiQuorum(coreSet.tLogWriteAntiQuorum), tLogReplicationFactor(coreSet.tLogReplicationFactor),
-    tLogLocalities(coreSet.tLogLocalities), tLogVersion(coreSet.tLogVersion), tLogPolicy(coreSet.tLogPolicy),
-    isLocal(coreSet.isLocal), locality(coreSet.locality), startVersion(coreSet.startVersion),
+    tLogLocalities(coreSet.tLogLocalities), tLogExclusionLocalities(coreSet.tLogLocalities),
+    tLogVersion(coreSet.tLogVersion), tLogPolicy(coreSet.tLogPolicy), isLocal(coreSet.isLocal),
+    locality(coreSet.locality), startVersion(coreSet.startVersion),
     satelliteTagLocations(coreSet.satelliteTagLocations) {
 	for (const auto& log : coreSet.tLogs) {
 		logServers.push_back(
@@ -555,10 +570,6 @@ void LogSystem::toCoreState(DBCoreState& newState) const {
 	for (const auto& t : tLogs) {
 		if (!t->logServers.empty()) {
 			newState.tLogs.push_back(toCoreTLogSet(*t));
-			newState.tLogs.back().tLogLocalities.clear();
-			for (const auto& log : t->logServers) {
-				newState.tLogs.back().tLogLocalities.push_back(log->get().interf().filteredLocality);
-			}
 		}
 	}
 
@@ -1146,29 +1157,63 @@ LogSystemConfig LogSystem::getLogSystemConfig() const {
 }
 
 Standalone<StringRef> LogSystem::getLogsValue() const {
+	return getLogsValue(LogsValue());
+}
+
+Standalone<StringRef> LogSystem::getLogsValue(const LogsValue& previousLogs) const {
 	std::vector<std::pair<UID, NetworkAddress>> logs;
 	std::vector<std::pair<UID, NetworkAddress>> oldLogs;
+	std::map<UID, LocalityData> logLocalities;
+	std::set<UID> incompleteLogLocalities;
 	for (auto& t : tLogs) {
 		if (t->isLocal || remoteLogsWrittenToCoreState) {
+			ASSERT(t->logServers.size() == t->tLogLocalities.size());
+			ASSERT(t->tLogExclusionLocalities.empty() || t->logServers.size() == t->tLogExclusionLocalities.size());
 			for (int i = 0; i < t->logServers.size(); i++) {
-				logs.emplace_back(t->logServers[i]->get().id(),
-				                  t->logServers[i]->get().present() ? t->logServers[i]->get().interf().address()
-				                                                    : NetworkAddress());
+				const auto& log = t->logServers[i]->get();
+				logs.emplace_back(log.id(), log.present() ? log.interf().address() : NetworkAddress());
+				if (log.present()) {
+					logLocalities[log.id()] = log.interf().filteredLocality;
+				} else if (auto previousLocality = previousLogs.logLocalities.find(log.id());
+				           previousLocality != previousLogs.logLocalities.end()) {
+					logLocalities[log.id()] = previousLocality->second;
+					if (previousLogs.incompleteLogLocalities.contains(log.id())) {
+						incompleteLogLocalities.insert(log.id());
+					}
+				} else {
+					logLocalities[log.id()] =
+					    t->tLogExclusionLocalities.empty() ? t->tLogLocalities[i] : t->tLogExclusionLocalities[i];
+					incompleteLogLocalities.insert(log.id());
+				}
 			}
 		}
 	}
 	if (!recoveryCompleteWrittenToCoreState.get()) {
 		for (int i = 0; i < oldLogData.size(); i++) {
 			for (auto& t : oldLogData[i].tLogs) {
+				ASSERT(t->logServers.size() == t->tLogLocalities.size());
+				ASSERT(t->tLogExclusionLocalities.empty() || t->logServers.size() == t->tLogExclusionLocalities.size());
 				for (int j = 0; j < t->logServers.size(); j++) {
-					oldLogs.emplace_back(t->logServers[j]->get().id(),
-					                     t->logServers[j]->get().present() ? t->logServers[j]->get().interf().address()
-					                                                       : NetworkAddress());
+					const auto& log = t->logServers[j]->get();
+					oldLogs.emplace_back(log.id(), log.present() ? log.interf().address() : NetworkAddress());
+					if (log.present()) {
+						logLocalities[log.id()] = log.interf().filteredLocality;
+					} else if (auto previousLocality = previousLogs.logLocalities.find(log.id());
+					           previousLocality != previousLogs.logLocalities.end()) {
+						logLocalities[log.id()] = previousLocality->second;
+						if (previousLogs.incompleteLogLocalities.contains(log.id())) {
+							incompleteLogLocalities.insert(log.id());
+						}
+					} else {
+						logLocalities[log.id()] =
+						    t->tLogExclusionLocalities.empty() ? t->tLogLocalities[j] : t->tLogExclusionLocalities[j];
+						incompleteLogLocalities.insert(log.id());
+					}
 				}
 			}
 		}
 	}
-	return logsValue(logs, oldLogs);
+	return logsValue(logs, oldLogs, logLocalities, incompleteLogLocalities);
 }
 
 Future<Void> LogSystem::onLogSystemConfigChange() {
@@ -1914,8 +1959,7 @@ Future<Void> LogSystem::epochEnd(Reference<AsyncVar<Reference<LogSystem>>> outLo
 	// trackRejoins listens for rejoin requests from the tLogs that we are recovering from, to learn their
 	// TLogInterfaces
 	std::vector<LogLockInfo> lockResults;
-	std::vector<std::pair<Reference<AsyncVar<OptionalInterface<TLogInterface>>>, Reference<IReplicationPolicy>>>
-	    allLogServers;
+	std::vector<Reference<AsyncVar<OptionalInterface<TLogInterface>>>> allLogServers;
 	std::vector<Reference<LogSet>> logServers;
 	std::vector<OldLogData> oldLogData;
 	std::vector<std::vector<Reference<AsyncVar<bool>>>> logFailed;
@@ -1926,7 +1970,7 @@ Future<Void> LogSystem::epochEnd(Reference<AsyncVar<Reference<LogSystem>>> outLo
 		std::vector<Reference<AsyncVar<bool>>> failed;
 
 		for (const auto& logVar : logServers.back()->logServers) {
-			allLogServers.emplace_back(logVar, coreSet.tLogPolicy);
+			allLogServers.push_back(logVar);
 			failed.push_back(makeReference<AsyncVar<bool>>());
 			failureTrackers.push_back(LogSystem::monitorLog(logVar, failed.back()));
 		}
@@ -1938,7 +1982,7 @@ Future<Void> LogSystem::epochEnd(Reference<AsyncVar<Reference<LogSystem>>> outLo
 
 		for (const auto& logSet : oldLogData.back().tLogs) {
 			for (const auto& logVar : logSet->logServers) {
-				allLogServers.emplace_back(logVar, logSet->tLogPolicy);
+				allLogServers.push_back(logVar);
 			}
 		}
 	}
@@ -2495,6 +2539,7 @@ Future<Void> LogSystem::newRemoteEpoch(Reference<LogSystem> oldLogSystem,
 		    OptionalInterface<TLogInterface>(remoteTLogInitializationReplies[i].get()));
 		logSet->tLogLocalities[i] = remoteWorkers.remoteTLogs[i].locality;
 	}
+	logSet->tLogExclusionLocalities = logSet->tLogLocalities;
 	filterLocalityDataForPolicy(logSet->tLogPolicy, &logSet->tLogLocalities);
 
 	std::vector<Future<Void>> recoveryComplete;
@@ -2612,6 +2657,7 @@ Future<Reference<LogSystem>> LogSystem::newEpoch(Reference<LogSystem> oldLogSyst
 		for (int i = 0; i < recr.satelliteTLogs.size(); i++) {
 			logSystem->tLogs[1]->tLogLocalities[i] = recr.satelliteTLogs[i].locality;
 		}
+		logSystem->tLogs[1]->tLogExclusionLocalities = logSystem->tLogs[1]->tLogLocalities;
 		filterLocalityDataForPolicy(logSystem->tLogs[1]->tLogPolicy, &logSystem->tLogs[1]->tLogLocalities);
 
 		logSystem->tLogs[1]->logServers.resize(
@@ -2915,6 +2961,7 @@ Future<Reference<LogSystem>> LogSystem::newEpoch(Reference<LogSystem> oldLogSyst
 		    OptionalInterface<TLogInterface>(primaryTLogReplies[i].get()));
 		logSystem->tLogs[0]->tLogLocalities[i] = recr.tLogs[i].locality;
 	}
+	logSystem->tLogs[0]->tLogExclusionLocalities = logSystem->tLogs[0]->tLogLocalities;
 	filterLocalityDataForPolicy(logSystem->tLogs[0]->tLogPolicy, &logSystem->tLogs[0]->tLogLocalities);
 
 	// Don't force failure of recovery if it took us a long time to recover. This avoids multiple long running
@@ -2962,18 +3009,16 @@ Future<Reference<LogSystem>> LogSystem::newEpoch(Reference<LogSystem> oldLogSyst
 	co_return logSystem;
 }
 
-Future<Void> LogSystem::trackRejoins(
-    UID dbgid,
-    std::vector<std::pair<Reference<AsyncVar<OptionalInterface<TLogInterface>>>, Reference<IReplicationPolicy>>>
-        logServers,
-    FutureStream<struct TLogRejoinRequest> rejoinRequests) {
+Future<Void> LogSystem::trackRejoins(UID dbgid,
+                                     std::vector<Reference<AsyncVar<OptionalInterface<TLogInterface>>>> logServers,
+                                     FutureStream<struct TLogRejoinRequest> rejoinRequests) {
 	std::map<UID, ReplyPromise<TLogRejoinReply>> lastReply;
 	std::set<UID> logsWaiting;
 	double startTime = now();
 	Future<Void> warnTimeout = delay(SERVER_KNOBS->TLOG_SLOW_REJOIN_WARN_TIMEOUT_SECS);
 
 	for (const auto& log : logServers) {
-		logsWaiting.insert(log.first->get().id());
+		logsWaiting.insert(log->get().id());
 	}
 
 	try {
@@ -2984,9 +3029,9 @@ Future<Void> LogSystem::trackRejoins(
 
 				int pos = -1;
 				for (int i = 0; i < logServers.size(); i++) {
-					if (logServers[i].first->get().id() == req.myInterface.id()) {
+					if (logServers[i]->get().id() == req.myInterface.id()) {
 						pos = i;
-						logsWaiting.erase(logServers[i].first->get().id());
+						logsWaiting.erase(logServers[i]->get().id());
 						break;
 					}
 				}
@@ -2994,12 +3039,11 @@ Future<Void> LogSystem::trackRejoins(
 					TraceEvent("TLogJoinedMe", dbgid)
 					    .detail("TLog", req.myInterface.id())
 					    .detail("Address", req.myInterface.commit.getEndpoint().getPrimaryAddress().toString());
-					if (!logServers[pos].first->get().present() ||
-					    req.myInterface.commit.getEndpoint() !=
-					        logServers[pos].first->get().interf().commit.getEndpoint()) {
-						TLogInterface interf = req.myInterface;
-						filterLocalityDataForPolicyDcAndProcess(logServers[pos].second, &interf.filteredLocality);
-						logServers[pos].first->setUnconditional(OptionalInterface<TLogInterface>(interf));
+					TLogInterface interf = req.myInterface;
+					if (!logServers[pos]->get().present() ||
+					    interf.commit.getEndpoint() != logServers[pos]->get().interf().commit.getEndpoint() ||
+					    interf.filteredLocality != logServers[pos]->get().interf().filteredLocality) {
+						logServers[pos]->setUnconditional(OptionalInterface<TLogInterface>(interf));
 					}
 					lastReply[req.myInterface.id()].send(TLogRejoinReply{ false });
 					lastReply[req.myInterface.id()] = req.reply;

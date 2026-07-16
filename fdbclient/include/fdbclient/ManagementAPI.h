@@ -109,6 +109,10 @@ std::set<AddressExclusion> getServerAddressesByLocality(
     const std::map<std::string, StorageServerInterface> server_interfaces,
     const std::string& locality);
 std::set<AddressExclusion> getAddressesByLocality(const std::vector<ProcessData>& workers, const std::string& locality);
+struct LogsValue;
+std::set<AddressExclusion> getLogAddressesByLocality(const LogsValue& logs,
+                                                     const std::string& locality,
+                                                     bool includeIncomplete = true);
 
 // Check for the given, previously excluded servers to be evacuated (no longer used for state).  If waitForExclusion
 // is true, this actor returns once it is safe to shut down all such machines without impacting fault tolerance,

@@ -25,10 +25,13 @@
 #include "fdbclient/Knobs.h"
 #include "fdbclient/ManagementAPI.h"
 #include "fdbclient/Schemas.h"
+#include "fdbclient/SystemData.h"
 
 #include "flow/Arena.h"
 #include "flow/FastRef.h"
 #include "flow/ThreadHelper.h"
+
+#include <algorithm>
 
 namespace {
 
@@ -197,20 +200,52 @@ Future<std::set<NetworkAddress>> getInProgressExclusion(Reference<ITransaction> 
 
 Future<std::set<NetworkAddress>> checkForExcludingServers(Reference<IDatabase> db,
                                                           std::set<AddressExclusion> exclusions,
+                                                          std::unordered_set<std::string> exclusionLocalities,
+                                                          std::unordered_set<std::string>* possibleLogLocalities,
+                                                          std::unordered_set<std::string>* matchedLogLocalities,
+                                                          std::set<AddressExclusion>* matchedLogExclusions,
                                                           bool waitForAllExcluded) {
 	std::set<NetworkAddress> inProgressExclusion;
-	Reference<ITransaction> tr = db->createTransaction();
-	tr->setOption(FDBTransactionOptions::SPECIAL_KEY_SPACE_ENABLE_WRITES);
-	tr->setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
 	while (true) {
+		Reference<ITransaction> tr = db->createTransaction();
 		inProgressExclusion.clear();
 		Error err;
-		bool hasErr = false;
 		try {
+			tr->setOption(FDBTransactionOptions::SPECIAL_KEY_SPACE_ENABLE_WRITES);
+			tr->setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+			if (!exclusionLocalities.empty()) {
+				tr->setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
+			}
 			std::set<NetworkAddress> result = co_await getInProgressExclusion(tr);
 			if (result.empty())
 				co_return inProgressExclusion;
 			inProgressExclusion = result;
+			std::set<AddressExclusion> effectiveExclusions = exclusions;
+			if (!exclusionLocalities.empty()) {
+				ThreadFuture<Optional<Value>> logsFuture = tr->get(logsKey);
+				Optional<Value> logs = co_await safeThreadFutureToFuture(logsFuture);
+				ASSERT(logs.present());
+				LogsValue logsValue = decodeLogsValue(logs.get());
+				possibleLogLocalities->clear();
+				matchedLogLocalities->clear();
+				matchedLogExclusions->clear();
+				for (const auto& locality : exclusionLocalities) {
+					auto localityExclusions = getLogAddressesByLocality(logsValue, locality);
+					effectiveExclusions.insert(localityExclusions.begin(), localityExclusions.end());
+					if (!localityExclusions.empty()) {
+						possibleLogLocalities->insert(locality);
+					}
+					auto confirmedExclusions = getLogAddressesByLocality(logsValue, locality, false);
+					if (!confirmedExclusions.empty()) {
+						matchedLogLocalities->insert(locality);
+						for (const auto& exclusion : confirmedExclusions) {
+							if (exclusion.isValid()) {
+								matchedLogExclusions->insert(exclusion);
+							}
+						}
+					}
+				}
+			}
 
 			// Check if all of the specified exclusions are done.
 			bool allExcluded = true;
@@ -219,7 +254,7 @@ Future<std::set<NetworkAddress>> checkForExcludingServers(Reference<IDatabase> d
 					break;
 				}
 
-				for (const auto& exclusion : exclusions) {
+				for (const auto& exclusion : effectiveExclusions) {
 					// We found an exclusion that is still in progress
 					if (exclusion.excludes(inProgressAddr)) {
 						allExcluded = false;
@@ -237,14 +272,15 @@ Future<std::set<NetworkAddress>> checkForExcludingServers(Reference<IDatabase> d
 				break;
 
 			co_await delayJittered(1.0); // SOMEDAY: watches!
+			continue;
 		} catch (Error& e) {
+			if (e.code() == error_code_actor_cancelled) {
+				throw;
+			}
 			err = e;
-			hasErr = true;
-		}
-		if (hasErr) {
 			TraceEvent(SevWarn, "CheckForExcludingServersError").error(err);
-			co_await safeThreadFutureToFuture(tr->onError(err));
 		}
+		co_await safeThreadFutureToFuture(tr->onError(err));
 	}
 	co_return inProgressExclusion;
 }
@@ -423,8 +459,22 @@ Future<bool> excludeCommandActor(Reference<IDatabase> db, std::vector<StringRef>
 		if (warn.isValid())
 			warn.cancel();
 
-		std::set<NetworkAddress> notExcludedServers =
-		    co_await checkForExcludingServers(db, exclusionSet, waitForAllExcluded);
+		std::unordered_set<std::string> possibleLogLocalities;
+		std::unordered_set<std::string> matchedLogLocalities;
+		std::set<AddressExclusion> matchedLogExclusions;
+		std::set<NetworkAddress> notExcludedServers = co_await checkForExcludingServers(db,
+		                                                                                exclusionSet,
+		                                                                                exclusionLocalities,
+		                                                                                &possibleLogLocalities,
+		                                                                                &matchedLogLocalities,
+		                                                                                &matchedLogExclusions,
+		                                                                                waitForAllExcluded);
+		exclusionSet.insert(matchedLogExclusions.begin(), matchedLogExclusions.end());
+		noMatchLocalities.erase(
+		    std::remove_if(noMatchLocalities.begin(),
+		                   noMatchLocalities.end(),
+		                   [&](const std::string& locality) { return matchedLogLocalities.contains(locality); }),
+		    noMatchLocalities.end());
 		std::map<IPAddress, std::set<uint16_t>> workerPorts;
 		for (const auto& addr : workers)
 			workerPorts[addr.address.ip].insert(addr.address.port);
@@ -476,6 +526,16 @@ Future<bool> excludeCommandActor(Reference<IDatabase> db, std::vector<StringRef>
 					    "  %s  ---- Successfully excluded. It is now safe to remove this process from the cluster.\n",
 					    exclusion.toString().c_str());
 				}
+			}
+		}
+
+		if (!notExcludedServers.empty() && !possibleLogLocalities.empty()) {
+			for (const auto& locality : possibleLogLocalities) {
+				fprintf(
+				    stderr,
+				    "  %s  ---- WARNING: Exclusion in progress on an unavailable transaction log! It is not safe to "
+				    "remove this locality from the cluster.\n",
+				    locality.c_str());
 			}
 		}
 

@@ -20,6 +20,7 @@
 
 #include "fdbserver/logsystem/LogSystem.h"
 #include "fdbserver/logsystem/LogSystemConsumer.h"
+#include "fdbclient/SystemData.h"
 #include "flow/UnitTest.h"
 
 namespace {
@@ -57,6 +58,144 @@ std::tuple<int, std::vector<TLogLockResult>, bool> makeLogGroupResults(
 } // namespace
 
 void forceLinkLogSystemRecoveryTests() {}
+
+TEST_CASE("/LogSystem/GetLogsValue/RoleLocalities") {
+	const UID liveLogId(1, 1);
+	const UID unavailableLogId(2, 1);
+	const UID incompleteLogId(2, 2);
+	const NetworkAddress liveAddress(IPAddress(0x0a000001), 4500);
+	LocalityData storedLiveLocality;
+	storedLiveLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("stale-process"_sr));
+	LocalityData liveLocality;
+	liveLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("rejoined-process"_sr));
+	LocalityData unavailableLocality;
+	unavailableLocality.set(LocalityData::keyMachineId, Standalone<StringRef>("unavailable-machine"_sr));
+	LocalityData previousUnavailableLocality = unavailableLocality;
+	previousUnavailableLocality.set("rack"_sr, Standalone<StringRef>("unavailable-rack"_sr));
+
+	TLogInterface liveLog(liveLogId, UID(1, 2), liveLocality);
+	liveLog.peekMessages = RequestStream<struct TLogPeekRequest>(Endpoint({ liveAddress }, UID(1, 3)));
+	auto currentSet = makeReference<LogSet>();
+	currentSet->isLocal = true;
+	currentSet->logServers.push_back(
+	    makeReference<AsyncVar<OptionalInterface<TLogInterface>>>(OptionalInterface<TLogInterface>(liveLog)));
+	currentSet->tLogLocalities.push_back(storedLiveLocality);
+
+	auto oldSet = makeReference<LogSet>();
+	oldSet->logServers.push_back(
+	    makeReference<AsyncVar<OptionalInterface<TLogInterface>>>(OptionalInterface<TLogInterface>(unavailableLogId)));
+	oldSet->logServers.push_back(
+	    makeReference<AsyncVar<OptionalInterface<TLogInterface>>>(OptionalInterface<TLogInterface>(incompleteLogId)));
+	oldSet->tLogLocalities.push_back(unavailableLocality);
+	oldSet->tLogLocalities.push_back(LocalityData());
+	OldLogData oldData;
+	oldData.tLogs.push_back(oldSet);
+
+	LogSystem logSystem(UID(), LocalityData(), LogEpoch(1));
+	logSystem.tLogs.push_back(currentSet);
+	logSystem.oldLogData.push_back(oldData);
+	LogsValue previousLogs;
+	previousLogs.logLocalities[unavailableLogId] = previousUnavailableLocality;
+	LogsValue logs = decodeLogsValue(logSystem.getLogsValue(previousLogs));
+
+	ASSERT(logs.logs.size() == 1);
+	ASSERT(logs.logs[0].first == liveLogId);
+	ASSERT(logs.logs[0].second == liveAddress);
+	ASSERT(logs.oldLogs.size() == 2);
+	ASSERT(logs.oldLogs[0].first == unavailableLogId);
+	ASSERT(logs.oldLogs[0].second == NetworkAddress());
+	ASSERT(logs.oldLogs[1].first == incompleteLogId);
+	ASSERT(logs.oldLogs[1].second == NetworkAddress());
+	ASSERT(logs.logLocalities.at(liveLogId).processId().get() == "rejoined-process"_sr);
+	ASSERT(logs.logLocalities.at(unavailableLogId).machineId().get() == "unavailable-machine"_sr);
+	ASSERT(logs.logLocalities.at(unavailableLogId).get("rack"_sr).get() == "unavailable-rack"_sr);
+	ASSERT(!logs.incompleteLogLocalities.contains(liveLogId));
+	ASSERT(!logs.incompleteLogLocalities.contains(unavailableLogId));
+	ASSERT(logs.incompleteLogLocalities.contains(incompleteLogId));
+
+	return Void();
+}
+
+TEST_CASE("/LogSystem/TrackRejoins/RefreshLocality") {
+	const UID logId(1, 1);
+	const NetworkAddress logAddress(IPAddress(0x0a000001), 4500);
+	const Endpoint peekEndpoint({ logAddress }, UID(1, 2));
+	const Endpoint commitEndpoint({ logAddress }, UID(1, 3));
+	LocalityData staleLocality;
+	staleLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("stale-process"_sr));
+	TLogInterface staleLog(logId, UID(1, 4), staleLocality);
+	staleLog.peekMessages = RequestStream<struct TLogPeekRequest>(peekEndpoint);
+	staleLog.commit = RequestStream<struct TLogCommitRequest>(commitEndpoint);
+	auto logVar = makeReference<AsyncVar<OptionalInterface<TLogInterface>>>(OptionalInterface<TLogInterface>(staleLog));
+
+	PromiseStream<TLogRejoinRequest> rejoins;
+	Future<Void> trackRejoins = LogSystem::trackRejoins(UID(), { logVar }, rejoins.getFuture());
+	LocalityData rejoinedLocality;
+	rejoinedLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("rejoined-process"_sr));
+	rejoinedLocality.set("rack"_sr, Standalone<StringRef>("rejoined-rack"_sr));
+	TLogInterface rejoinedLog(logId, UID(1, 4), rejoinedLocality);
+	rejoinedLog.peekMessages = RequestStream<struct TLogPeekRequest>(peekEndpoint);
+	rejoinedLog.commit = RequestStream<struct TLogCommitRequest>(commitEndpoint);
+	Future<Void> changed = logVar->onChange();
+	rejoins.send(TLogRejoinRequest(rejoinedLog));
+	co_await changed;
+
+	ASSERT(logVar->get().interf().filteredLocality.processId().get() == "rejoined-process"_sr);
+	ASSERT(logVar->get().interf().filteredLocality.get("rack"_sr).get() == "rejoined-rack"_sr);
+	trackRejoins.cancel();
+
+	co_return;
+}
+
+TEST_CASE("/LogSystem/CoreState/OldLogLocalities") {
+	const UID oldLogId(2, 1);
+	const NetworkAddress oldAddress(IPAddress(0x0a000002), 4500);
+	LocalityData staleLocality;
+	staleLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("stale-process"_sr));
+	LocalityData rejoinedLocality;
+	rejoinedLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("rejoined-process"_sr));
+	rejoinedLocality.set("rack"_sr, Standalone<StringRef>("rejoined-rack"_sr));
+	TLogInterface oldLog(oldLogId, UID(2, 2), rejoinedLocality);
+	oldLog.peekMessages = RequestStream<struct TLogPeekRequest>(Endpoint({ oldAddress }, UID(2, 3)));
+
+	auto oldSet = makeReference<LogSet>();
+	oldSet->logServers.push_back(
+	    makeReference<AsyncVar<OptionalInterface<TLogInterface>>>(OptionalInterface<TLogInterface>(oldLog)));
+	oldSet->tLogLocalities.push_back(staleLocality);
+	oldSet->tLogExclusionLocalities.push_back(staleLocality);
+	OldLogData oldData;
+	oldData.tLogs.push_back(oldSet);
+	LogSystem source(UID(), LocalityData(), LogEpoch(1));
+	source.oldLogData.push_back(oldData);
+	LogSystemConfig config = source.getLogSystemConfig();
+	ASSERT(config.oldTLogs.size() == 1);
+	ASSERT(config.oldTLogs[0].tLogs.size() == 1);
+	ASSERT(config.oldTLogs[0].tLogs[0].tLogLocalities[0].get("rack"_sr).get() == "rejoined-rack"_sr);
+	TLogSet changedLogSet = config.oldTLogs[0].tLogs[0];
+	changedLogSet.tLogLocalities[0].set("rack"_sr, Standalone<StringRef>("changed-rack"_sr));
+	ASSERT(!(changedLogSet == config.oldTLogs[0].tLogs[0]));
+
+	DBCoreState coreState;
+	source.toCoreState(coreState);
+	ASSERT(coreState.oldTLogData.size() == 1);
+	ASSERT(coreState.oldTLogData[0].tLogs.size() == 1);
+	ASSERT(coreState.oldTLogData[0].tLogs[0].tLogLocalities[0].get("rack"_sr).get() == "rejoined-rack"_sr);
+	CoreTLogSet changedCoreSet = coreState.oldTLogData[0].tLogs[0];
+	changedCoreSet.tLogLocalities[0].set("rack"_sr, Standalone<StringRef>("changed-rack"_sr));
+	ASSERT(!(changedCoreSet == coreState.oldTLogData[0].tLogs[0]));
+
+	LogSystem recovered(UID(), LocalityData(), LogEpoch(2));
+	recovered.oldLogData.emplace_back(coreState.oldTLogData[0]);
+	LogsValue logs = decodeLogsValue(recovered.getLogsValue());
+	ASSERT(logs.oldLogs.size() == 1);
+	ASSERT(logs.oldLogs[0].first == oldLogId);
+	ASSERT(logs.oldLogs[0].second == NetworkAddress());
+	ASSERT(logs.logLocalities.at(oldLogId).processId().get() == "rejoined-process"_sr);
+	ASSERT(logs.logLocalities.at(oldLogId).get("rack"_sr).get() == "rejoined-rack"_sr);
+	ASSERT(logs.incompleteLogLocalities.contains(oldLogId));
+
+	return Void();
+}
 
 TEST_CASE("/LogSystem/PopLogRouter/CurrentGenerationAcceptsPredecessor") {
 	constexpr Version generationStart = 100;

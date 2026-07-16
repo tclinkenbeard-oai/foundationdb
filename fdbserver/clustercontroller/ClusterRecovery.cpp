@@ -904,7 +904,7 @@ Future<Void> updateLogsValue(Reference<ClusterRecoveryData> self, Database cx) {
 			auto logs = decodeLogsValue(value.get());
 
 			std::set<UID> logIds;
-			for (auto& log : logs.first) {
+			for (auto& log : logs.logs) {
 				logIds.insert(log.first);
 			}
 
@@ -926,7 +926,7 @@ Future<Void> updateLogsValue(Reference<ClusterRecoveryData> self, Database cx) {
 				co_return;
 			}
 
-			tr.set(logsKey, self->logSystem->getLogsValue());
+			tr.set(logsKey, self->logSystem->getLogsValue(logs));
 			co_await tr.commit();
 			co_return;
 		} catch (Error& e) {

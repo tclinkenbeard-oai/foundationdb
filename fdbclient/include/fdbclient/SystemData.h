@@ -573,10 +573,20 @@ extern const KeyRef minRequiredCommitVersionKey;
 //	number of microseconds since the Unix epoch.
 extern const KeyRef versionEpochKey;
 
+struct LogsValue {
+	std::vector<std::pair<UID, NetworkAddress>> logs;
+	std::vector<std::pair<UID, NetworkAddress>> oldLogs;
+	// V2 appends role-ID-keyed localities so unavailable TLogs retain their exclusion identity.
+	std::map<UID, LocalityData> logLocalities;
+	// An unavailable role recovered from legacy state may only have policy-filtered locality data.
+	std::set<UID> incompleteLogLocalities;
+};
+
 Value logsValue(const std::vector<std::pair<UID, NetworkAddress>>& logs,
-                const std::vector<std::pair<UID, NetworkAddress>>& oldLogs);
-std::pair<std::vector<std::pair<UID, NetworkAddress>>, std::vector<std::pair<UID, NetworkAddress>>> decodeLogsValue(
-    const ValueRef& value);
+                const std::vector<std::pair<UID, NetworkAddress>>& oldLogs,
+                const std::map<UID, LocalityData>& logLocalities,
+                const std::set<UID>& incompleteLogLocalities);
+LogsValue decodeLogsValue(const ValueRef& value);
 
 // The "global keys" are sent to each storage server any time they are changed
 extern const KeyRef globalKeysPrefix;

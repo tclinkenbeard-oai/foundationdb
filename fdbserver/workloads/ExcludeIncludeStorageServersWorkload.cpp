@@ -112,7 +112,7 @@ struct ExcludeIncludeStorageServersWorkload : TestWorkload {
 				Optional<Standalone<StringRef>> value = co_await tr.get(logsKey);
 				ASSERT(value.present());
 				auto logs = decodeLogsValue(value.get());
-				for (auto const& log : logs.first) {
+				for (auto const& log : logs.logs) {
 					servers.erase(AddressExclusion(log.second.ip, log.second.port));
 				}
 

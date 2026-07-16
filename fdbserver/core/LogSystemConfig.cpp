@@ -34,8 +34,9 @@ std::string TLogSet::toString() const {
 bool TLogSet::operator==(const TLogSet& rhs) const {
 	if (tLogWriteAntiQuorum != rhs.tLogWriteAntiQuorum || tLogReplicationFactor != rhs.tLogReplicationFactor ||
 	    isLocal != rhs.isLocal || satelliteTagLocations != rhs.satelliteTagLocations ||
-	    startVersion != rhs.startVersion || tLogs.size() != rhs.tLogs.size() || locality != rhs.locality ||
-	    logRouters.size() != rhs.logRouters.size() || backupWorkers.size() != rhs.backupWorkers.size()) {
+	    startVersion != rhs.startVersion || tLogLocalities != rhs.tLogLocalities || tLogs.size() != rhs.tLogs.size() ||
+	    locality != rhs.locality || logRouters.size() != rhs.logRouters.size() ||
+	    backupWorkers.size() != rhs.backupWorkers.size()) {
 		return false;
 	}
 	if ((tLogPolicy && !rhs.tLogPolicy) || (!tLogPolicy && rhs.tLogPolicy) ||

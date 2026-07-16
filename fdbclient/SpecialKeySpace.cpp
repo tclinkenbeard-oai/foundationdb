@@ -1231,6 +1231,41 @@ Future<Optional<std::string>> FailedServersRangeImpl::commit(ReadYourWritesTrans
 	return excludeCommitActor(ryw, true);
 }
 
+namespace {
+void addExcludedLogs(const std::vector<std::pair<UID, NetworkAddress>>& logs,
+                     const std::map<UID, LocalityData>& logLocalities,
+                     const std::set<UID>& incompleteLogLocalities,
+                     const std::set<AddressExclusion>& exclusions,
+                     const std::vector<std::pair<std::string, std::string>>& excludedLocalities,
+                     std::set<NetworkAddress>& inProgressExclusion) {
+	for (const auto& [logId, logAddress] : logs) {
+		bool excluded = logAddress == NetworkAddress() || addressExcluded(exclusions, logAddress);
+		if (!excluded && !excludedLocalities.empty()) {
+			auto logLocality = logLocalities.find(logId);
+			// A legacy logs value cannot prove that a role does not match the requested locality.
+			if (logLocality == logLocalities.end()) {
+				excluded = true;
+			} else {
+				for (const auto& excludedLocality : excludedLocalities) {
+					auto value = logLocality->second.get(excludedLocality.first);
+					if (value.present() && value.get() == excludedLocality.second) {
+						excluded = true;
+						break;
+					}
+					if (!value.present() && incompleteLogLocalities.contains(logId)) {
+						excluded = true;
+						break;
+					}
+				}
+			}
+		}
+		if (excluded) {
+			inProgressExclusion.insert(logAddress);
+		}
+	}
+}
+} // namespace
+
 Future<RangeResult> ExclusionInProgressActor(ReadYourWritesTransaction* ryw, KeyRef prefix, KeyRangeRef kr) {
 	RangeResult result;
 	Transaction& tr = ryw->getTransaction();
@@ -1292,20 +1327,19 @@ Future<RangeResult> ExclusionInProgressActor(ReadYourWritesTransaction* ryw, Key
 	co_await fLogsKey;
 	Optional<Standalone<StringRef>> value = fLogsKey.get();
 	ASSERT(value.present());
-	// TODO(jscheuermann): The logs key range doesn't hold any information about localities. This is a limitation
-	// for locality based exclusions. The problematic edge case here is a log server that still has mutation on it
-	// but is currently not part of the worker list, e.g. because it was shutdown or is partitioned.
 	auto logs = decodeLogsValue(value.get());
-	for (const auto& [_logId, logAddress] : logs.first) {
-		if (logAddress == NetworkAddress() || addressExcluded(exclusions, logAddress)) {
-			inProgressExclusion.insert(logAddress);
-		}
-	}
-	for (const auto& [_logId, logAddress] : logs.second) {
-		if (logAddress == NetworkAddress() || addressExcluded(exclusions, logAddress)) {
-			inProgressExclusion.insert(logAddress);
-		}
-	}
+	addExcludedLogs(logs.logs,
+	                logs.logLocalities,
+	                logs.incompleteLogLocalities,
+	                exclusions,
+	                decodedExcludedLocalities,
+	                inProgressExclusion);
+	addExcludedLogs(logs.oldLogs,
+	                logs.logLocalities,
+	                logs.incompleteLogLocalities,
+	                exclusions,
+	                decodedExcludedLocalities,
+	                inProgressExclusion);
 
 	// sort and remove :tls
 	std::set<std::string> inProgressAddresses;
@@ -1322,6 +1356,63 @@ Future<RangeResult> ExclusionInProgressActor(ReadYourWritesTransaction* ryw, Key
 	}
 
 	co_return result;
+}
+
+TEST_CASE("/SpecialKeySpace/ExclusionInProgress/TLogLocalities") {
+	const NetworkAddress currentAddress(IPAddress(0x0a000001), 4500);
+	const NetworkAddress oldAddress(IPAddress(0x0a000002), 4500);
+	const NetworkAddress addressExcludedLog(IPAddress(0x0a000003), 4500);
+	const NetworkAddress unrelatedAddress(IPAddress(0x0a000004), 4500);
+	const NetworkAddress incompleteAddress(IPAddress(0x0a000005), 4500);
+
+	LocalityData currentLocality;
+	currentLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("current-process"_sr));
+	currentLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("current-zone"_sr));
+	LocalityData oldLocality;
+	oldLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("old-process"_sr));
+	oldLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("old-zone"_sr));
+	oldLocality.set(LocalityData::keyMachineId, Standalone<StringRef>("old-machine"_sr));
+	LocalityData unrelatedLocality;
+	unrelatedLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("unrelated-process"_sr));
+	unrelatedLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("unrelated-zone"_sr));
+
+	std::vector<std::pair<UID, NetworkAddress>> currentLogs = { { UID(1, 1), currentAddress },
+		                                                        { UID(1, 2), unrelatedAddress },
+		                                                        { UID(1, 3), incompleteAddress } };
+	std::vector<std::pair<UID, NetworkAddress>> oldLogs = { { UID(2, 1), oldAddress },
+		                                                    { UID(2, 2), addressExcludedLog },
+		                                                    { UID(2, 3), NetworkAddress() } };
+	std::map<UID, LocalityData> logLocalities = { { UID(1, 2), unrelatedLocality }, { UID(2, 1), oldLocality },
+		                                          { UID(1, 1), currentLocality },   { UID(1, 3), LocalityData() },
+		                                          { UID(2, 2), unrelatedLocality }, { UID(2, 3), unrelatedLocality } };
+	std::set<AddressExclusion> exclusions = { AddressExclusion(addressExcludedLog.ip, addressExcludedLog.port) };
+	std::vector<std::pair<std::string, std::string>> excludedLocalities = { { "processid", "current-process" },
+		                                                                    { "machineid", "old-machine" },
+		                                                                    { "rack", "target-rack" } };
+	std::set<UID> incompleteLogLocalities = { UID(1, 3) };
+	std::set<NetworkAddress> inProgress;
+
+	addExcludedLogs(currentLogs, logLocalities, incompleteLogLocalities, exclusions, excludedLocalities, inProgress);
+	addExcludedLogs(oldLogs, logLocalities, incompleteLogLocalities, exclusions, excludedLocalities, inProgress);
+
+	ASSERT(inProgress.contains(currentAddress));
+	ASSERT(inProgress.contains(oldAddress));
+	ASSERT(inProgress.contains(addressExcludedLog));
+	ASSERT(inProgress.contains(NetworkAddress()));
+	ASSERT(!inProgress.contains(unrelatedAddress));
+	ASSERT(inProgress.contains(incompleteAddress));
+
+	std::set<NetworkAddress> legacyInProgress;
+	addExcludedLogs(currentLogs, {}, {}, {}, excludedLocalities, legacyInProgress);
+	ASSERT(legacyInProgress.contains(currentAddress));
+	ASSERT(legacyInProgress.contains(unrelatedAddress));
+	ASSERT(legacyInProgress.contains(incompleteAddress));
+
+	std::set<NetworkAddress> legacyWithoutLocalityExclusion;
+	addExcludedLogs(currentLogs, {}, {}, {}, {}, legacyWithoutLocalityExclusion);
+	ASSERT(legacyWithoutLocalityExclusion.empty());
+
+	return Void();
 }
 
 ExclusionInProgressRangeImpl::ExclusionInProgressRangeImpl(KeyRangeRef kr) : SpecialKeyRangeAsyncImpl(kr) {}

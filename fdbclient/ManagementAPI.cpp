@@ -2026,6 +2026,76 @@ std::set<AddressExclusion> getAddressesByLocality(const std::vector<ProcessData>
 	return locality_addresses;
 }
 
+std::set<AddressExclusion> getLogAddressesByLocality(const LogsValue& logs,
+                                                     const std::string& locality,
+                                                     bool includeIncomplete) {
+	auto localityKeyValue = decodeLocality(locality);
+	std::set<AddressExclusion> localityAddresses;
+	auto addLogs = [&](const std::vector<std::pair<UID, NetworkAddress>>& entries) {
+		for (const auto& [logId, logAddress] : entries) {
+			auto logLocality = logs.logLocalities.find(logId);
+			if (logLocality == logs.logLocalities.end()) {
+				// A legacy logs value cannot prove that a role does not match the requested locality.
+				if (includeIncomplete) {
+					localityAddresses.insert(AddressExclusion(logAddress.ip, logAddress.port));
+				}
+				continue;
+			}
+			auto value = logLocality->second.get(localityKeyValue.first);
+			if (value.present() && value.get() == localityKeyValue.second) {
+				localityAddresses.insert(AddressExclusion(logAddress.ip, logAddress.port));
+			} else if (includeIncomplete && !value.present() && logs.incompleteLogLocalities.contains(logId)) {
+				localityAddresses.insert(AddressExclusion(logAddress.ip, logAddress.port));
+			}
+		}
+	};
+	addLogs(logs.logs);
+	addLogs(logs.oldLogs);
+	return localityAddresses;
+}
+
+TEST_CASE("/ManagementAPI/LogAddressesByLocality") {
+	const NetworkAddress currentAddress(IPAddress(0x0a000001), 4500);
+	const NetworkAddress oldAddress(IPAddress(0x0a000002), 4500);
+	const NetworkAddress unrelatedAddress(IPAddress(0x0a000003), 4500);
+	LocalityData currentLocality;
+	currentLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("current-process"_sr));
+	LocalityData oldLocality;
+	oldLocality.set(LocalityData::keyMachineId, Standalone<StringRef>("old-machine"_sr));
+	LocalityData unrelatedLocality;
+	unrelatedLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("unrelated-process"_sr));
+
+	LogsValue logs;
+	logs.logs = { { UID(1, 2), unrelatedAddress }, { UID(1, 1), currentAddress } };
+	logs.oldLogs = { { UID(2, 1), oldAddress }, { UID(2, 2), NetworkAddress() } };
+	logs.logLocalities = { { UID(1, 1), currentLocality },
+		                   { UID(1, 2), unrelatedLocality },
+		                   { UID(2, 1), oldLocality },
+		                   { UID(2, 2), currentLocality } };
+	logs.incompleteLogLocalities = { UID(1, 2) };
+
+	auto current = getLogAddressesByLocality(logs, "locality_processid:current-process");
+	ASSERT(current.contains(AddressExclusion(currentAddress.ip, currentAddress.port)));
+	ASSERT(current.contains(AddressExclusion()));
+	ASSERT(!current.contains(AddressExclusion(unrelatedAddress.ip, unrelatedAddress.port)));
+	auto old = getLogAddressesByLocality(logs, "locality_machineid:old-machine", false);
+	ASSERT(old == std::set<AddressExclusion>{ AddressExclusion(oldAddress.ip, oldAddress.port) });
+	ASSERT(getLogAddressesByLocality(logs, "locality_processid:missing").empty());
+	auto incomplete = getLogAddressesByLocality(logs, "locality_rack:target-rack");
+	ASSERT(incomplete == std::set<AddressExclusion>{ AddressExclusion(unrelatedAddress.ip, unrelatedAddress.port) });
+	ASSERT(getLogAddressesByLocality(logs, "locality_rack:target-rack", false).empty());
+
+	logs.logLocalities.clear();
+	auto legacy = getLogAddressesByLocality(logs, "locality_processid:current-process");
+	ASSERT(legacy.contains(AddressExclusion(currentAddress.ip, currentAddress.port)));
+	ASSERT(legacy.contains(AddressExclusion(oldAddress.ip, oldAddress.port)));
+	ASSERT(legacy.contains(AddressExclusion(unrelatedAddress.ip, unrelatedAddress.port)));
+	ASSERT(legacy.contains(AddressExclusion()));
+	ASSERT(getLogAddressesByLocality(logs, "locality_processid:current-process", false).empty());
+
+	return Void();
+}
+
 Future<Void> printHealthyZone(Database cx) {
 	Transaction tr(cx);
 	while (true) {
@@ -2197,13 +2267,13 @@ Future<bool> checkForExcludingServersTxActor(ReadYourWritesTransaction* tr,
 		Optional<Standalone<StringRef>> value = co_await tr->get(logsKey);
 		ASSERT(value.present());
 		auto logs = decodeLogsValue(value.get());
-		for (const auto& [_logId, logAddress] : logs.first) {
+		for (const auto& [_logId, logAddress] : logs.logs) {
 			if (logAddress == NetworkAddress() || addressExcluded(*exclusions, logAddress)) {
 				ok = false;
 				inProgressExclusion->insert(logAddress);
 			}
 		}
-		for (const auto& [_logId, logAddress] : logs.second) {
+		for (const auto& [_logId, logAddress] : logs.oldLogs) {
 			if (logAddress == NetworkAddress() || addressExcluded(*exclusions, logAddress)) {
 				ok = false;
 				inProgressExclusion->insert(logAddress);

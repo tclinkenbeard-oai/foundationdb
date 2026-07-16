@@ -78,6 +78,8 @@ public:
 	int32_t tLogWriteAntiQuorum;
 	int32_t tLogReplicationFactor;
 	std::vector<LocalityData> tLogLocalities;
+	// Keep the unfiltered localities for durable exclusion metadata; tLogLocalities stays policy-filtered.
+	std::vector<LocalityData> tLogExclusionLocalities;
 	TLogVersion tLogVersion;
 	Reference<IReplicationPolicy> tLogPolicy;
 	Reference<LocalitySet> logServerSet;

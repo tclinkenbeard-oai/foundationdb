@@ -450,20 +450,44 @@ const KeyRangeRef ddStatsRange =
     KeyRangeRef("\xff\xff/metrics/data_distribution_stats/"_sr, "\xff\xff/metrics/data_distribution_stats/\xff\xff"_sr);
 
 Value logsValue(const std::vector<std::pair<UID, NetworkAddress>>& logs,
-                const std::vector<std::pair<UID, NetworkAddress>>& oldLogs) {
-	BinaryWriter wr(IncludeVersion(ProtocolVersion::withLogsValue()));
+                const std::vector<std::pair<UID, NetworkAddress>>& oldLogs,
+                const std::map<UID, LocalityData>& logLocalities,
+                const std::set<UID>& incompleteLogLocalities) {
+	for (const auto& log : logs) {
+		ASSERT(logLocalities.contains(log.first));
+	}
+	for (const auto& log : oldLogs) {
+		ASSERT(logLocalities.contains(log.first));
+	}
+	for (const auto& logId : incompleteLogLocalities) {
+		ASSERT(logLocalities.contains(logId));
+	}
+	BinaryWriter wr(IncludeVersion(ProtocolVersion::withLogsValueV2()));
 	wr << logs;
 	wr << oldLogs;
+	wr << logLocalities;
+	wr << incompleteLogLocalities;
 	return wr.toValue();
 }
-std::pair<std::vector<std::pair<UID, NetworkAddress>>, std::vector<std::pair<UID, NetworkAddress>>> decodeLogsValue(
-    const ValueRef& value) {
-	std::vector<std::pair<UID, NetworkAddress>> logs;
-	std::vector<std::pair<UID, NetworkAddress>> oldLogs;
+LogsValue decodeLogsValue(const ValueRef& value) {
+	LogsValue logs;
 	BinaryReader reader(value, IncludeVersion());
-	reader >> logs;
-	reader >> oldLogs;
-	return std::make_pair(logs, oldLogs);
+	reader >> logs.logs;
+	reader >> logs.oldLogs;
+	if (reader.protocolVersion().hasLogsValueV2()) {
+		reader >> logs.logLocalities;
+		reader >> logs.incompleteLogLocalities;
+		for (const auto& log : logs.logs) {
+			ASSERT(logs.logLocalities.contains(log.first));
+		}
+		for (const auto& log : logs.oldLogs) {
+			ASSERT(logs.logLocalities.contains(log.first));
+		}
+		for (const auto& logId : logs.incompleteLogLocalities) {
+			ASSERT(logs.logLocalities.contains(logId));
+		}
+	}
+	return logs;
 }
 
 const KeyRangeRef serverKeysRange = KeyRangeRef("\xff/serverKeys/"_sr, "\xff/serverKeys0"_sr);
@@ -1802,6 +1826,55 @@ TEST_CASE("/SystemData/SerDes/SSI") {
 
 	testSSISerdes(ssi);
 	printf("ssi serdes test complete\n");
+
+	return Void();
+}
+
+TEST_CASE("/SystemData/SerDes/LogsValue") {
+	std::vector<std::pair<UID, NetworkAddress>> logs = { { UID(1, 1), NetworkAddress(IPAddress(0x0a000001), 4500) },
+		                                                 { UID(1, 2), NetworkAddress() } };
+	std::vector<std::pair<UID, NetworkAddress>> oldLogs = { { UID(2, 1),
+		                                                      NetworkAddress(IPAddress(0x0a000002), 4500) } };
+	LocalityData logLocality;
+	logLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("current-process"_sr));
+	logLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("current-zone"_sr));
+	LocalityData unavailableLogLocality;
+	unavailableLogLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("unavailable-process"_sr));
+	unavailableLogLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("unavailable-zone"_sr));
+	LocalityData oldLogLocality;
+	oldLogLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("old-process"_sr));
+	oldLogLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("old-zone"_sr));
+	std::map<UID, LocalityData> logLocalities = { { UID(1, 1), logLocality },
+		                                          { UID(1, 2), unavailableLogLocality },
+		                                          { UID(2, 1), oldLogLocality } };
+	std::set<UID> incompleteLogLocalities = { UID(1, 2) };
+
+	Value encoded = logsValue(logs, oldLogs, logLocalities, incompleteLogLocalities);
+	LogsValue decoded = decodeLogsValue(encoded);
+	ASSERT(decoded.logs == logs);
+	ASSERT(decoded.oldLogs == oldLogs);
+	ASSERT(decoded.logLocalities == logLocalities);
+	ASSERT(decoded.incompleteLogLocalities == incompleteLogLocalities);
+
+	// Older readers consume the two original vectors and ignore the appended locality data.
+	BinaryReader oldReader(encoded, IncludeVersion());
+	std::vector<std::pair<UID, NetworkAddress>> oldReaderLogs;
+	std::vector<std::pair<UID, NetworkAddress>> oldReaderOldLogs;
+	oldReader >> oldReaderLogs;
+	oldReader >> oldReaderOldLogs;
+	ASSERT(oldReaderLogs == logs);
+	ASSERT(oldReaderOldLogs == oldLogs);
+	ASSERT(!oldReader.empty());
+
+	// New readers continue to accept legacy values that do not contain locality data.
+	BinaryWriter legacyWriter(IncludeVersion(ProtocolVersion::withLogsValue()));
+	legacyWriter << logs;
+	legacyWriter << oldLogs;
+	LogsValue legacyDecoded = decodeLogsValue(legacyWriter.toValue());
+	ASSERT(legacyDecoded.logs == logs);
+	ASSERT(legacyDecoded.oldLogs == oldLogs);
+	ASSERT(legacyDecoded.logLocalities.empty());
+	ASSERT(legacyDecoded.incompleteLogLocalities.empty());
 
 	return Void();
 }

@@ -54,6 +54,7 @@ struct LogPushData;
 struct LocalityData;
 struct LogSystem;
 struct LogSystemConsumer;
+struct LogsValue;
 class LogSet;
 struct ConnectionResetInfo;
 
@@ -405,6 +406,7 @@ struct LogSystem : ReferenceCounted<LogSystem> {
 	LogSystemConfig getLogSystemConfig() const;
 
 	Standalone<StringRef> getLogsValue() const;
+	Standalone<StringRef> getLogsValue(const LogsValue& previousLogs) const;
 
 	Future<Void> onLogSystemConfigChange();
 
@@ -502,11 +504,9 @@ struct LogSystem : ReferenceCounted<LogSystem> {
 	                                             std::vector<Tag> allTags,
 	                                             Reference<AsyncVar<bool>> recruitmentStalled);
 
-	static Future<Void> trackRejoins(
-	    UID dbgid,
-	    std::vector<std::pair<Reference<AsyncVar<OptionalInterface<TLogInterface>>>, Reference<IReplicationPolicy>>>
-	        logServers,
-	    FutureStream<struct TLogRejoinRequest> rejoinRequests);
+	static Future<Void> trackRejoins(UID dbgid,
+	                                 std::vector<Reference<AsyncVar<OptionalInterface<TLogInterface>>>> logServers,
+	                                 FutureStream<struct TLogRejoinRequest> rejoinRequests);
 
 	// Keeps track of the recovered generations in all the TLogs in `tlogs` list and updates the latest
 	// `recoveredVersion`.
