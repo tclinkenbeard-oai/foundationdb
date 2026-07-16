@@ -32,6 +32,8 @@
 #include "flow/DeterministicRandom.h"
 #include "fdbrpc/SimulatorProcessInfo.h"
 
+#include <memory>
+
 static std::set<int> const& normalAttritionErrors() {
 	static std::set<int> s;
 	if (s.empty()) {
@@ -65,6 +67,121 @@ Future<bool> ignoreSSFailuresForDuration(Database cx, double duration) {
 	}
 }
 
+class MachineAttritionPhase {
+public:
+	using Owner = uint64_t;
+
+	static std::shared_ptr<MachineAttritionPhase> get(int64_t phaseId) {
+		static std::map<int64_t, std::weak_ptr<MachineAttritionPhase>> phases;
+		for (auto it = phases.begin(); it != phases.end();) {
+			if (it->second.expired()) {
+				it = phases.erase(it);
+			} else {
+				++it;
+			}
+		}
+
+		auto& phase = phases[phaseId];
+		if (auto existing = phase.lock()) {
+			return existing;
+		}
+		auto created = std::shared_ptr<MachineAttritionPhase>(new MachineAttritionPhase());
+		phase = created;
+		return created;
+	}
+
+	Owner registerWorkload(int machinesToLeave) {
+		this->machinesToLeave = std::max(this->machinesToLeave, machinesToLeave);
+		return nextOwner++;
+	}
+
+	void observe(std::vector<LocalityData> const& machines) {
+		for (auto const& machine : machines) {
+			knownZones.insert(machine.zoneId());
+		}
+	}
+
+	bool prepareTargets(std::vector<LocalityData>& machines, Owner owner) const {
+		bool canClaimNew =
+		    static_cast<int64_t>(knownZones.size()) - static_cast<int64_t>(targetOwners.size()) > machinesToLeave;
+		machines.erase(std::remove_if(machines.begin(),
+		                              machines.end(),
+		                              [this, owner, canClaimNew](LocalityData const& machine) {
+			                              auto target = targetOwners.find(machine.zoneId());
+			                              return (target != targetOwners.end() && target->second != owner) ||
+			                                     (target == targetOwners.end() && !canClaimNew);
+		                              }),
+		               machines.end());
+		return !machines.empty();
+	}
+
+	void claim(LocalityData const& machine, Owner owner) {
+		auto target = targetOwners.find(machine.zoneId());
+		if (target != targetOwners.end()) {
+			ASSERT(target->second == owner);
+			return;
+		}
+		ASSERT(static_cast<int64_t>(knownZones.size()) - static_cast<int64_t>(targetOwners.size()) > machinesToLeave);
+		targetOwners.emplace(machine.zoneId(), owner);
+	}
+
+	bool prepareDataCenterTargets(std::vector<LocalityData>& machines, Owner owner) const {
+		std::set<Optional<Standalone<StringRef>>> unavailableDataCenters;
+		for (auto const& machine : machines) {
+			auto target = targetOwners.find(machine.zoneId());
+			if (target != targetOwners.end() && target->second != owner) {
+				unavailableDataCenters.insert(machine.dcId());
+			}
+		}
+		machines.erase(std::remove_if(machines.begin(),
+		                              machines.end(),
+		                              [&unavailableDataCenters](LocalityData const& machine) {
+			                              return unavailableDataCenters.contains(machine.dcId());
+		                              }),
+		               machines.end());
+		return !machines.empty();
+	}
+
+	void claimDataCenter(std::vector<LocalityData> const& machines,
+	                     Optional<Standalone<StringRef>> const& dataCenter,
+	                     Owner owner) {
+		for (auto const& machine : machines) {
+			if (machine.dcId() != dataCenter) {
+				continue;
+			}
+			auto target = targetOwners.find(machine.zoneId());
+			ASSERT(target == targetOwners.end() || target->second == owner);
+			targetOwners.emplace(machine.zoneId(), owner);
+		}
+	}
+
+	bool claimDataHall(std::vector<LocalityData> const& machines, std::string const& dataHall, Owner owner) {
+		for (auto const& machine : machines) {
+			if (!machine.dataHallId().present() || machine.dataHallId().get().toString() != dataHall) {
+				continue;
+			}
+			auto target = targetOwners.find(machine.zoneId());
+			if (target != targetOwners.end() && target->second != owner) {
+				return false;
+			}
+		}
+		for (auto const& machine : machines) {
+			if (machine.dataHallId().present() && machine.dataHallId().get().toString() == dataHall) {
+				targetOwners.emplace(machine.zoneId(), owner);
+			}
+		}
+		return true;
+	}
+
+private:
+	MachineAttritionPhase() = default;
+
+	Owner nextOwner = 1;
+	int machinesToLeave = 0;
+	std::set<Optional<Standalone<StringRef>>> knownZones;
+	std::map<Optional<Standalone<StringRef>>, Owner> targetOwners;
+};
+
 struct MachineAttritionWorkload : FailureInjectionWorkload {
 	static constexpr auto NAME = "Attrition";
 	bool enabled;
@@ -88,11 +205,17 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 
 	// This is set in setup from the list of workers when the cluster is started
 	std::vector<LocalityData> machines;
+	std::shared_ptr<MachineAttritionPhase> phase;
+	MachineAttritionPhase::Owner phaseOwner = 0;
 
 	MachineAttritionWorkload(WorkloadContext const& wcx, NoOptions) : FailureInjectionWorkload(wcx) {
 		enabled = !clientId && g_network->isSimulated() && faultInjectionActivated;
 		suspendDuration = 10.0;
 		iterate = true;
+		if (enabled) {
+			phase = MachineAttritionPhase::get(wcx.sharedRandomNumber);
+			phaseOwner = phase->registerWorkload(machinesToLeave);
+		}
 	}
 
 	explicit MachineAttritionWorkload(WorkloadContext const& wcx) : FailureInjectionWorkload(wcx) {
@@ -120,6 +243,10 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		replacement = getOption(options, "replacement"_sr, reboot && deterministicRandom()->random01() < 0.5);
 		waitForVersion = getOption(options, "waitForVersion"_sr, waitForVersion);
 		allowFaultInjection = getOption(options, "allowFaultInjection"_sr, allowFaultInjection);
+		if (enabled) {
+			phase = MachineAttritionPhase::get(wcx.sharedRandomNumber);
+			phaseOwner = phase->registerWorkload(machinesToLeave);
+		}
 	}
 
 	bool shouldInject(DeterministicRandom& random,
@@ -130,13 +257,6 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 			return false;
 		}
 		return work.useDatabase && random.random01() < 1.0 / (2.0 + alreadyAdded);
-	}
-
-	void disableFailureInjectionWorkloads(std::set<std::string>& out) const override {
-		// An explicitly configured Attrition workload already owns the test's machine-failure schedule. Adding an
-		// automatic Attrition actor gives the two workloads independent target lists, so they can select the same
-		// machine and violate each other's failure budgets.
-		out.insert("Attrition");
 	}
 
 	void initializeForInjection(DeterministicRandom& random) {
@@ -189,6 +309,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 			for (auto it = machineIDMap.begin(); it != machineIDMap.end(); ++it) {
 				machines.push_back(it->second);
 			}
+			phase->observe(machines);
 			deterministicRandom()->randomShuffle(machines);
 			double meanDelay = testDuration / machinesToKill;
 			TraceEvent("AttritionStarting")
@@ -346,8 +467,13 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 				co_await delay(delayBeforeKill);
 
 				// decide on a machine to kill
-				ASSERT(!machines.empty());
+				if (!phase->prepareDataCenterTargets(machines, phaseOwner)) {
+					break;
+				}
 				Optional<Standalone<StringRef>> target = machines.back().dcId();
+				// A whole-datacenter failure can exceed the machine floor, but its zones still consume the shared
+				// budget.
+				phase->claimDataCenter(machines, target, phaseOwner);
 
 				ISimulator::KillType kt = ISimulator::KillType::Reboot;
 				if (!reboot) {
@@ -374,6 +500,9 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 				// It only makes sense to kill a single data hall.
 				ASSERT(targetIds.size() == 1);
 				auto target = targetIds.front();
+				if (!phase->claimDataHall(machines, target, phaseOwner)) {
+					break;
+				}
 
 				auto kt = ISimulator::KillType::KillInstantly;
 				TraceEvent("Assassination").detail("TargetDataHall", target).detail("KillType", kt);
@@ -389,7 +518,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 				g_simulator->toggleGlobalSwitchCluster();
 			} else {
 				int killedMachines = 0;
-				while (killedMachines < machinesToKill && machines.size() > machinesToLeave) {
+				while (killedMachines < machinesToKill && phase->prepareTargets(machines, phaseOwner)) {
 					TraceEvent("WorkerKillBegin")
 					    .detail("KilledMachines", killedMachines)
 					    .detail("MachinesToKill", machinesToKill)
@@ -418,7 +547,11 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 					}
 
 					// decide on a machine to kill
+					if (!phase->prepareTargets(machines, phaseOwner)) {
+						break;
+					}
 					LocalityData targetMachine = machines.back();
+					phase->claim(targetMachine, phaseOwner);
 					if (buggify(0.01)) {
 						CODE_PROBE(true, "Marked a zone for maintenance before killing it");
 						co_await setHealthyZone(
@@ -500,6 +633,98 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 			throw please_reboot();
 	}
 };
+
+TEST_CASE("/fdbserver/workloads/MachineAttrition/phaseCoordination") {
+	auto locality = [](StringRef zone) {
+		return LocalityData(Optional<Standalone<StringRef>>(),
+		                    Standalone<StringRef>(zone),
+		                    Standalone<StringRef>(zone),
+		                    Optional<Standalone<StringRef>>());
+	};
+	std::vector<LocalityData> allMachines = {
+		locality("zone0"_sr), locality("zone1"_sr), locality("zone2"_sr), locality("zone3"_sr), locality("zone4"_sr)
+	};
+
+	auto phase = MachineAttritionPhase::get(-1);
+	auto firstOwner = phase->registerWorkload(1);
+	auto secondOwner = phase->registerWorkload(3);
+	auto thirdOwner = phase->registerWorkload(0);
+	phase->observe(allMachines);
+
+	auto firstTargets = allMachines;
+	ASSERT(phase->prepareTargets(firstTargets, firstOwner));
+	LocalityData firstTarget = firstTargets.back();
+	phase->claim(firstTarget, firstOwner);
+	firstTargets.pop_back();
+
+	auto secondTargets = allMachines;
+	ASSERT(phase->prepareTargets(secondTargets, secondOwner));
+	LocalityData secondTarget = secondTargets.back();
+	ASSERT(secondTarget.zoneId() != firstTarget.zoneId());
+	phase->claim(secondTarget, secondOwner);
+
+	// The strongest leave-alive floor is shared, but replacement can still revisit an owned target.
+	ASSERT(phase->prepareTargets(secondTargets, secondOwner));
+	ASSERT(secondTargets.size() == 1);
+	ASSERT(secondTargets.back().zoneId() == secondTarget.zoneId());
+	phase->claim(secondTargets.back(), secondOwner);
+	ASSERT(!phase->prepareTargets(firstTargets, firstOwner));
+	auto thirdTargets = allMachines;
+	ASSERT(!phase->prepareTargets(thirdTargets, thirdOwner));
+
+	// A different TestSpec has no target claims or failure budget from the first phase.
+	auto nextPhase = MachineAttritionPhase::get(-2);
+	auto nextOwner = nextPhase->registerWorkload(0);
+	auto nextTargets = allMachines;
+	nextPhase->observe(nextTargets);
+	ASSERT(phase.get() != nextPhase.get());
+	ASSERT(nextPhase->prepareTargets(nextTargets, nextOwner));
+	ASSERT(nextTargets.size() == allMachines.size());
+
+	return Void();
+}
+
+TEST_CASE("/fdbserver/workloads/MachineAttrition/mixedScopeCoordination") {
+	auto locality = [](StringRef zone, StringRef dataCenter) {
+		LocalityData result{ Optional<Standalone<StringRef>>(),
+			                 Standalone<StringRef>(zone),
+			                 Standalone<StringRef>(zone),
+			                 Standalone<StringRef>(dataCenter) };
+		result.set(LocalityData::keyDataHallId, Standalone<StringRef>(dataCenter));
+		return result;
+	};
+	std::vector<LocalityData> allMachines = { locality("zone0"_sr, "dc0"_sr),
+		                                      locality("zone1"_sr, "dc0"_sr),
+		                                      locality("zone2"_sr, "dc1"_sr),
+		                                      locality("zone3"_sr, "dc1"_sr),
+		                                      locality("zone4"_sr, "dc1"_sr) };
+
+	auto phase = MachineAttritionPhase::get(-3);
+	auto machineOwner = phase->registerWorkload(0);
+	auto dataCenterOwner = phase->registerWorkload(0);
+	auto dataHallOwner = phase->registerWorkload(2);
+	phase->observe(allMachines);
+
+	auto machineTargets = allMachines;
+	ASSERT(phase->prepareTargets(machineTargets, machineOwner));
+	phase->claim(machineTargets.back(), machineOwner);
+
+	// A datacenter containing another workload's target is unavailable, so select and claim the other datacenter.
+	auto dataCenterTargets = allMachines;
+	ASSERT(phase->prepareDataCenterTargets(dataCenterTargets, dataCenterOwner));
+	ASSERT(dataCenterTargets.size() == 2);
+	ASSERT(dataCenterTargets.back().dcId().get() == "dc0"_sr);
+	phase->claimDataCenter(dataCenterTargets, dataCenterTargets.back().dcId(), dataCenterOwner);
+
+	// The datacenter's zones count toward the shared floor and a conflicting data-hall failure is rejected.
+	auto dataHallTargets = allMachines;
+	ASSERT(!phase->prepareTargets(dataHallTargets, dataHallOwner));
+	ASSERT(!phase->claimDataHall(allMachines, "dc1", dataHallOwner));
+	ASSERT(!phase->claimDataHall(allMachines, "dc0", dataHallOwner));
+	ASSERT(phase->claimDataHall(allMachines, "missing", dataHallOwner));
+
+	return Void();
+}
 
 WorkloadFactory<MachineAttritionWorkload> MachineAttritionWorkloadFactory;
 FailureInjectorFactory<MachineAttritionWorkload> MachineAttritionFailureWorkloadFactory;
