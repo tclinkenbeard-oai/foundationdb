@@ -10,6 +10,7 @@ faultInjection = false
 
 [[knobs]]
 enable_native_cdc = true
+native_cdc_tag_count = 1
 cdc_proxy_failure_coalesce_delay = 0.1
 
 [[test]]

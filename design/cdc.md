@@ -111,8 +111,9 @@ Multi-range registration is not part of the initial API.
 Registration and removal are low-rate control-plane operations intended for
 stable stream lifecycles, not per-request stream churn. The initial
 implementation does not define a supported registrations-per-second target:
-each change can scan global CDC metadata and wake a full durable ownership
-rescan. Applications should register long-lived streams and reuse them.
+registration reads the bounded per-tag owner index, and each change can wake a
+full durable ownership rescan. Applications should register long-lived
+streams and reuse them.
 
 A stream registration contains:
 
@@ -334,6 +335,8 @@ in transaction state:
 | `\xff/cdc/maxStreamId` | `CDCStreamId` | Allocates monotonic stream identifiers. |
 | `\xff/cdc/keys/<streamId>` | `KeyRange` | Stores the immutable registered range for an active stream. |
 | `\xff/cdc/tagHistory/<streamId>/<version>/<tag>` | empty | Records the CDC tag assignment history used for routing and historical reads. |
+| `\xff/cdc/tagOwners/<tag>` | proxy ID and active-stream count | Stores the current owner and number of active streams for each allocated CDC tag. |
+| `\xff/cdc/tagOwnersInitialized` | active-stream count | Marks completion of the one-time per-tag owner-index backfill and validates its aggregate count. |
 | `\xff/cdc/proxies/<streamId>/<proxyId>` | empty | Stores the CDC proxy assigned to an active stream. |
 | `\xff/cdc/proxyAssignmentChange` | version/change signal | Wakes ownership monitoring when durable assignments change. |
 | `\xff/cdc/retiredTagPop/<tag>` | empty | Retains recovery-visible pending final-pop work after removal. |
@@ -346,6 +349,16 @@ history entry uses the registration transaction's read version as a
 conservative inclusive lower bound. The versionstamped `minVersion` uses the
 commit version, and the proxy starts at the maximum of those two values, so the
 earlier history boundary cannot expose pre-registration mutations.
+
+The per-tag owner index is bounded by the configured CDC tag pool. It provides
+both the active-stream counts used for allocation and the shared proxy owner,
+so steady-state registration does not scan every active stream or tag-history
+entry. Clusters with CDC streams created before the index existed reconstruct
+the index once from active stream, tag-history, and proxy-assignment metadata;
+the backfill reconciles any split shared-tag assignments to one durable owner.
+The initialized marker distinguishes a completed empty index from one that has
+not yet been backfilled and detects a missing owner row without requiring a
+steady-state global metadata scan.
 
 ### Storage-backed system data
 
@@ -377,12 +390,13 @@ Registration runs as a durable metadata transaction:
    same-name/same-range rule, even when admission is disabled.
 3. For a new name, it validates the feature knob.
 4. It allocates a new monotonically increasing `CDCStreamId`.
-5. It selects a CDC tag using current active stream counts. The allocator uses
-   the least populated tag among `NATIVE_CDC_TAG_COUNT` tags (256 by default),
-   choosing the lowest tag ID on a tie.
+5. It selects a CDC tag using the bounded per-tag owner index. The allocator
+   uses the least populated tag among `NATIVE_CDC_TAG_COUNT` tags (256 by
+   default), choosing the lowest tag ID on a tie.
 6. It records the stream name, range, initial tag history entry, and
    versionstamped initial minimum version.
-7. It records an available CDC proxy owner and signals assignment monitoring.
+7. It increments the selected tag's active-stream count, records its shared CDC
+   proxy owner and the stream assignment, and signals assignment monitoring.
 
 The tag allocator bounds the number of distinct CDC log streams while allowing
 many user streams. Several streams may therefore share one tag intentionally.
@@ -403,6 +417,7 @@ Registration writes:
 * Transaction state `\xff/cdc/name/orders -> 7`.
 * Transaction state `\xff/cdc/keys/7 -> ["order/", "order0")`.
 * Transaction state `\xff/cdc/tagHistory/7/995/tagLocalityCDC:3 -> empty`.
+* Transaction state `\xff/cdc/tagOwners/tagLocalityCDC:3 -> (P1, 1)`.
 * Transaction state `\xff/cdc/proxies/7/P1 -> empty` and the assignment-change
   signal.
 * Storage-backed system key `\xff\x02/cdc/minVersion/7 -> 1000`.
@@ -410,7 +425,9 @@ Registration writes:
 If the consumer later acknowledges mutations through version `1200`,
 `\xff\x02/cdc/minVersion/7` advances to `1201`. If the stream is then removed
 at version `1500`, removal deletes the active name, range, proxy, tag-history,
-and `minVersion` rows, and writes retired final-pop work for
+and `minVersion` rows, decrements the active count for the current tag (and
+clears its owner row when that count reaches zero), and writes retired
+final-pop work for
 `tagLocalityCDC:3`: a transaction-state `\xff/cdc/retiredTagPop/<tag>` marker
 and a storage-backed `\xff\x02/cdc/retiredTagPopVersion/<tag>` watermark for
 the removal version. CDC proxies finish that retired work only after it is safe
@@ -591,7 +608,9 @@ metadata scan.
 ### Removing a stream
 
 Removing a stream eliminates its active name, range, tag history, minimum
-version, and ownership rows. Removal must not unconditionally pop each tag in
+version, and stream-ownership rows. It decrements the active-stream count for
+the stream's current tag and clears that tag-owner row only when the last
+active stream leaves the tag. Removal must not unconditionally pop each tag in
 the removed history: a different live stream may share a tag and still need
 older data.
 
@@ -645,8 +664,10 @@ reading at durable acknowledgement watermarks.
 
 The cluster controller monitors durable proxy assignment rows and repairs
 stale owner identifiers when endpoints are replaced or the controller itself
-is reconstructed. Clients obtain the currently published owner for their
-stream ID and retry transient proxy/routing failures.
+is reconstructed. Per-tag owner rows are updated with the stream assignments
+so future registrations continue to share the replacement proxy. Clients
+obtain the currently published owner for their stream ID and retry transient
+proxy/routing failures.
 If a live stream temporarily has no published owner during repair, its client
 operation waits for a new assignment. Removal is terminal and wakes that wait;
 callers may cancel or externally bound the operation when they need a local
@@ -760,12 +781,12 @@ policy simple.
 * Assignment mutations use one coalescing change key that wakes a full durable
   ownership rescan. This is appropriate for low-rate control-plane changes but
   should be sharded if registration and removal throughput becomes material.
-* Registration metadata discovery, acknowledgement safe-pop calculation,
+* One-time owner-index backfill, acknowledgement safe-pop calculation,
   ownership publication, and failed-proxy reassignment each scan global CDC
   metadata in one transaction. The scans page their reads but do not split the
   transaction, so stream-count growth is bounded by FoundationDB transaction
   size and lifetime limits until these paths are sharded or incrementally
-  maintained.
+  maintained. Steady-state registration reads only the bounded per-tag index.
 * There is no background process that changes a live stream's CDC tag in
   response to load. A future implementation can use versioned tag history to
   make such changes without losing the ability to read earlier tagged data.
@@ -775,7 +796,8 @@ policy simple.
 These improvements must preserve the acknowledgement and retired-pop
 invariants above. In particular, moving a stream between tags cannot forget an
 old tag until all data protected by that assignment has either been
-acknowledged and popped or retained as finite final-pop work.
+acknowledged and popped or retained as finite final-pop work, and must
+atomically transfer its active-stream count between tag-owner rows.
 
 ## Alternatives considered
 

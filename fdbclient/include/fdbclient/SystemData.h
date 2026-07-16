@@ -323,6 +323,22 @@ Key cdcTagHistoryKeyFor(CDCStreamId streamId, Version version, Tag tag);
 KeyRange cdcTagHistoryRangeFor(CDCStreamId streamId);
 CDCTagHistoryEntry decodeCDCTagHistoryKey(KeyRef const& key);
 
+// "\xff/cdc/tagOwners/[[Tag]]" := "[[proxyUID]][[activeStreamCount]]"
+struct CDCTagOwner {
+	UID proxyId;
+	uint64_t activeStreamCount = 0;
+};
+
+extern const KeyRangeRef cdcTagOwnerKeys;
+// "\xff/cdc/tagOwnersInitialized" := "[[activeStreamCount]]"
+extern const KeyRef cdcTagOwnersInitializedKey;
+Key cdcTagOwnerKeyFor(Tag tag);
+Tag decodeCDCTagOwnerKey(KeyRef const& key);
+Value cdcTagOwnerValue(CDCTagOwner const& owner);
+CDCTagOwner decodeCDCTagOwnerValue(ValueRef const& value);
+Value cdcTagOwnersInitializedValue(uint64_t activeStreamCount);
+uint64_t decodeCDCTagOwnersInitializedValue(ValueRef const& value);
+
 // Native CDC acknowledgement progress is regular storage-server-backed system data.
 // "\xff\x02/cdc/minVersion/[[CDCStreamId]]" := "[[Version]]"
 // The initial value is versionstamped at stream registration commit.

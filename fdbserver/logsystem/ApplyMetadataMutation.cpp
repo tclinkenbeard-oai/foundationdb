@@ -625,8 +625,9 @@ private:
 
 	void checkSetCDCMetadata(MutationRef m) {
 		if (!cdcStreamNameKeys.contains(m.param1) && !cdcStreamKeys.contains(m.param1) &&
-		    !cdcTagHistoryKeys.contains(m.param1) && !cdcRetiredTagPopKeys.contains(m.param1) &&
-		    !cdcProxyKeys.contains(m.param1) && m.param1 != cdcMaxStreamIdKey &&
+		    !cdcTagHistoryKeys.contains(m.param1) && !cdcTagOwnerKeys.contains(m.param1) &&
+		    !cdcRetiredTagPopKeys.contains(m.param1) && !cdcProxyKeys.contains(m.param1) &&
+		    m.param1 != cdcMaxStreamIdKey && m.param1 != cdcTagOwnersInitializedKey &&
 		    m.param1 != cdcProxyAssignmentChangeKey) {
 			return;
 		}
@@ -1092,21 +1093,29 @@ private:
 
 	void checkClearCDCMetadata(KeyRangeRef range) {
 		if (!cdcStreamNameKeys.intersects(range) && !cdcStreamKeys.intersects(range) &&
-		    !cdcTagHistoryKeys.intersects(range) && !cdcRetiredTagPopKeys.intersects(range) &&
-		    !cdcProxyKeys.intersects(range) && !range.contains(cdcMaxStreamIdKey)) {
+		    !cdcTagHistoryKeys.intersects(range) && !cdcTagOwnerKeys.intersects(range) &&
+		    !cdcRetiredTagPopKeys.intersects(range) && !cdcProxyKeys.intersects(range) &&
+		    !range.contains(cdcMaxStreamIdKey) && !range.contains(cdcTagOwnersInitializedKey)) {
 			return;
 		}
 		// CDC tags may be shared and acknowledgement minima are stored outside transaction state.
 		// A durable retired-tag watermark lets any CDC proxy finish pops after stream removal.
 		if (!initialCommit) {
-			for (const KeyRangeRef cdcRange :
-			     { cdcStreamNameKeys, cdcStreamKeys, cdcTagHistoryKeys, cdcRetiredTagPopKeys, cdcProxyKeys }) {
+			for (const KeyRangeRef cdcRange : { cdcStreamNameKeys,
+			                                    cdcStreamKeys,
+			                                    cdcTagHistoryKeys,
+			                                    cdcTagOwnerKeys,
+			                                    cdcRetiredTagPopKeys,
+			                                    cdcProxyKeys }) {
 				if (cdcRange.intersects(range)) {
 					txnStateStore->clear(cdcRange & range);
 				}
 			}
 			if (range.contains(cdcMaxStreamIdKey)) {
 				txnStateStore->clear(singleKeyRange(cdcMaxStreamIdKey));
+			}
+			if (range.contains(cdcTagOwnersInitializedKey)) {
+				txnStateStore->clear(singleKeyRange(cdcTagOwnersInitializedKey));
 			}
 		}
 		if (toCommit && SERVER_KNOBS->ENABLE_VERSION_VECTOR_TLOG_UNICAST &&
@@ -1347,8 +1356,9 @@ bool containsMetadataMutation(const VectorRef<MutationRef>& mutations) {
 			    (m.param1.startsWith(logRangesRange.begin)) || (m.param1.startsWith(serverKeysPrefix)) ||
 			    (m.param1.startsWith(keyServersPrefix)) || cdcStreamNameKeys.contains(m.param1) ||
 			    cdcStreamKeys.contains(m.param1) || cdcTagHistoryKeys.contains(m.param1) ||
-			    cdcRetiredTagPopKeys.contains(m.param1) || cdcProxyKeys.contains(m.param1) ||
-			    m.param1 == cdcMaxStreamIdKey || m.param1 == cdcProxyAssignmentChangeKey) {
+			    cdcTagOwnerKeys.contains(m.param1) || cdcRetiredTagPopKeys.contains(m.param1) ||
+			    cdcProxyKeys.contains(m.param1) || m.param1 == cdcMaxStreamIdKey ||
+			    m.param1 == cdcTagOwnersInitializedKey || m.param1 == cdcProxyAssignmentChangeKey) {
 				return true;
 			}
 		} else if (m.type == MutationRef::ClearRange && isSystemKey(m.param2)) {
@@ -1363,8 +1373,9 @@ bool containsMetadataMutation(const VectorRef<MutationRef>& mutations) {
 			    (range.contains(metadataVersionKey)) || (range.contains(mustContainSystemMutationsKey)) ||
 			    (range.contains(writeRecoveryKey)) || (range.intersects(testOnlyTxnStateStorePrefixRange)) ||
 			    cdcStreamNameKeys.intersects(range) || cdcStreamKeys.intersects(range) ||
-			    cdcTagHistoryKeys.intersects(range) || cdcRetiredTagPopKeys.intersects(range) ||
-			    cdcProxyKeys.intersects(range) || range.contains(cdcMaxStreamIdKey)) {
+			    cdcTagHistoryKeys.intersects(range) || cdcTagOwnerKeys.intersects(range) ||
+			    cdcRetiredTagPopKeys.intersects(range) || cdcProxyKeys.intersects(range) ||
+			    range.contains(cdcMaxStreamIdKey) || range.contains(cdcTagOwnersInitializedKey)) {
 				return true;
 			}
 		}

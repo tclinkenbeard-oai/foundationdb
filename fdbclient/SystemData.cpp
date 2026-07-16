@@ -787,6 +787,8 @@ const KeyRangeRef cdcStreamNameKeys("\xff/cdc/name/"_sr, "\xff/cdc/name0"_sr);
 const KeyRef cdcMaxStreamIdKey = "\xff/cdc/maxStreamId"_sr;
 const KeyRangeRef cdcStreamKeys("\xff/cdc/keys/"_sr, "\xff/cdc/keys0"_sr);
 const KeyRangeRef cdcTagHistoryKeys("\xff/cdc/tagHistory/"_sr, "\xff/cdc/tagHistory0"_sr);
+const KeyRangeRef cdcTagOwnerKeys("\xff/cdc/tagOwners/"_sr, "\xff/cdc/tagOwners0"_sr);
+const KeyRef cdcTagOwnersInitializedKey = "\xff/cdc/tagOwnersInitialized"_sr;
 const KeyRangeRef cdcMinVersionKeys("\xff\x02/cdc/minVersion/"_sr, "\xff\x02/cdc/minVersion0"_sr);
 const KeyRangeRef cdcRetiredTagPopKeys("\xff/cdc/retiredTagPop/"_sr, "\xff/cdc/retiredTagPop0"_sr);
 const KeyRangeRef cdcRetiredTagPopVersionKeys("\xff\x02/cdc/retiredTagPopVersion/"_sr,
@@ -882,6 +884,48 @@ CDCTagHistoryEntry decodeCDCTagHistoryKey(KeyRef const& key) {
 	BinaryReader reader(key.removePrefix(cdcTagHistoryKeys.begin), Unversioned());
 	reader >> streamId >> encodedVersion >> tag;
 	return CDCTagHistoryEntry(streamId, bigEndian64(encodedVersion), tag);
+}
+
+Key cdcTagOwnerKeyFor(Tag tag) {
+	BinaryWriter wr(Unversioned());
+	wr.serializeBytes(cdcTagOwnerKeys.begin);
+	wr << tag;
+	return wr.toValue();
+}
+
+Tag decodeCDCTagOwnerKey(KeyRef const& key) {
+	Tag tag;
+	BinaryReader reader(key.removePrefix(cdcTagOwnerKeys.begin), Unversioned());
+	reader >> tag;
+	return tag;
+}
+
+Value cdcTagOwnerValue(CDCTagOwner const& owner) {
+	BinaryWriter wr(IncludeVersion(ProtocolVersion::withNativeCdc()));
+	wr << owner.proxyId << owner.activeStreamCount;
+	return wr.toValue();
+}
+
+CDCTagOwner decodeCDCTagOwnerValue(ValueRef const& value) {
+	CDCTagOwner owner;
+	BinaryReader reader(value, IncludeVersion());
+	ASSERT_WE_THINK(reader.protocolVersion().hasNativeCdc());
+	reader >> owner.proxyId >> owner.activeStreamCount;
+	return owner;
+}
+
+Value cdcTagOwnersInitializedValue(uint64_t activeStreamCount) {
+	BinaryWriter wr(IncludeVersion(ProtocolVersion::withNativeCdc()));
+	wr << activeStreamCount;
+	return wr.toValue();
+}
+
+uint64_t decodeCDCTagOwnersInitializedValue(ValueRef const& value) {
+	uint64_t activeStreamCount;
+	BinaryReader reader(value, IncludeVersion());
+	ASSERT_WE_THINK(reader.protocolVersion().hasNativeCdc());
+	reader >> activeStreamCount;
+	return activeStreamCount;
 }
 
 Key cdcMinVersionKeyFor(CDCStreamId streamId) {
@@ -1959,6 +2003,14 @@ TEST_CASE("/SystemData/NativeCDC") {
 	ASSERT_EQ(deserializedTagHistory.streamId, streamId);
 	ASSERT_EQ(deserializedTagHistory.version, minVersion);
 	ASSERT_EQ(deserializedTagHistory.tag, tag);
+
+	const Key tagOwnerKey = cdcTagOwnerKeyFor(tag);
+	ASSERT_EQ(decodeCDCTagOwnerKey(tagOwnerKey), tag);
+	ASSERT(cdcTagOwnerKeys.contains(tagOwnerKey));
+	const CDCTagOwner decodedTagOwner = decodeCDCTagOwnerValue(cdcTagOwnerValue(CDCTagOwner{ proxyId, 7 }));
+	ASSERT_EQ(decodedTagOwner.proxyId, proxyId);
+	ASSERT_EQ(decodedTagOwner.activeStreamCount, 7);
+	ASSERT_EQ(decodeCDCTagOwnersInitializedValue(cdcTagOwnersInitializedValue(7)), 7);
 
 	const auto [proxyStreamId, decodedProxyId] = decodeCDCProxyKey(cdcProxyKeyFor(streamId, proxyId));
 	ASSERT_EQ(proxyStreamId, streamId);

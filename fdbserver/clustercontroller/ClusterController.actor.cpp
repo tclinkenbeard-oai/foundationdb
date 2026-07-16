@@ -2223,6 +2223,31 @@ Future<Void> monitorCDCProxyAssignmentsPass(ClusterControllerData* self) {
 				begin = keyAfter(assignments.back().key);
 			}
 
+			std::unordered_map<Tag, CDCTagOwner> tagOwners;
+			std::unordered_map<Tag, UID> fallbackTagOwners;
+			begin = cdcTagOwnerKeys.begin;
+			while (begin < cdcTagOwnerKeys.end) {
+				RangeResult owners =
+				    co_await tr.getRange(KeyRangeRef(begin, cdcTagOwnerKeys.end), CDC_PROXY_ASSIGNMENT_SCAN_LIMIT);
+				for (const auto& owner : owners) {
+					tagOwners.emplace(decodeCDCTagOwnerKey(owner.key), decodeCDCTagOwnerValue(owner.value));
+				}
+				if (!owners.more) {
+					break;
+				}
+				begin = keyAfter(owners.back().key);
+			}
+
+			auto replacementForFailedProxy = [&](UID proxyId) {
+				auto replacement = replacementByFailedProxy.find(proxyId);
+				if (replacement != replacementByFailedProxy.end()) {
+					return replacement->second;
+				}
+				const UID replacementProxyId = availableProxies[replacementIndex++ % availableProxies.size()].id();
+				replacementByFailedProxy.emplace(proxyId, replacementProxyId);
+				return replacementProxyId;
+			};
+
 			const std::map<CDCStreamId, UID> previouslyPublishedAssignments = db->clientInfo->get().streamToCDCProxyId;
 			for (const CDCStreamId streamId : activeStreamIds) {
 				auto durableAssignment = durableAssignments.find(streamId);
@@ -2231,13 +2256,7 @@ Future<Void> monitorCDCProxyAssignmentsPass(ClusterControllerData* self) {
 					UID resolvedProxyId = proxyId;
 					const bool hasOwner = containsCDCProxy(availableProxies, proxyId);
 					if (!availableProxies.empty() && !hasOwner) {
-						auto replacement = replacementByFailedProxy.find(proxyId);
-						if (replacement == replacementByFailedProxy.end()) {
-							resolvedProxyId = availableProxies[replacementIndex++ % availableProxies.size()].id();
-							replacementByFailedProxy.emplace(proxyId, resolvedProxyId);
-						} else {
-							resolvedProxyId = replacement->second;
-						}
+						resolvedProxyId = replacementForFailedProxy(proxyId);
 						tr.clear(cdcProxyKeyFor(streamId, proxyId));
 						tr.set(cdcProxyKeyFor(streamId, resolvedProxyId), Value());
 						repairedAssignment = true;
@@ -2253,11 +2272,34 @@ Future<Void> monitorCDCProxyAssignmentsPass(ClusterControllerData* self) {
 				if (durableAssignment == durableAssignments.end() && !availableProxies.empty()) {
 					auto previousAssignment = previouslyPublishedAssignments.find(streamId);
 					UID resolvedProxyId;
-					if (previousAssignment != previouslyPublishedAssignments.end() &&
-					    containsCDCProxy(availableProxies, previousAssignment->second)) {
+					Optional<UID> sharedTagProxy;
+					Optional<Tag> currentTag;
+					RangeResult history =
+					    co_await tr.getRange(cdcTagHistoryRangeFor(streamId), 1, Snapshot::False, Reverse::True);
+					if (!history.empty()) {
+						currentTag = decodeCDCTagHistoryKey(history.front().key).tag;
+						auto tagOwner = tagOwners.find(currentTag.get());
+						if (tagOwner != tagOwners.end()) {
+							sharedTagProxy = tagOwner->second.proxyId;
+						} else {
+							auto fallback = fallbackTagOwners.find(currentTag.get());
+							if (fallback != fallbackTagOwners.end()) {
+								sharedTagProxy = fallback->second;
+							}
+						}
+					}
+					if (sharedTagProxy.present()) {
+						resolvedProxyId = containsCDCProxy(availableProxies, sharedTagProxy.get())
+						                      ? sharedTagProxy.get()
+						                      : replacementForFailedProxy(sharedTagProxy.get());
+					} else if (previousAssignment != previouslyPublishedAssignments.end() &&
+					           containsCDCProxy(availableProxies, previousAssignment->second)) {
 						resolvedProxyId = previousAssignment->second;
 					} else {
 						resolvedProxyId = availableProxies[replacementIndex++ % availableProxies.size()].id();
+					}
+					if (currentTag.present() && !sharedTagProxy.present()) {
+						fallbackTagOwners.emplace(currentTag.get(), resolvedProxyId);
 					}
 					tr.clear(cdcProxyRangeFor(streamId));
 					tr.set(cdcProxyKeyFor(streamId, resolvedProxyId), Value());
@@ -2269,6 +2311,16 @@ Future<Void> monitorCDCProxyAssignmentsPass(ClusterControllerData* self) {
 					    .detail("HadPublishedAssignment", previousAssignment != previouslyPublishedAssignments.end());
 					const auto [_, inserted] = streamToCDCProxyId.emplace(streamId, resolvedProxyId);
 					ASSERT_WE_THINK(inserted);
+				}
+			}
+
+			if (!availableProxies.empty()) {
+				for (auto& [tag, owner] : tagOwners) {
+					if (!containsCDCProxy(availableProxies, owner.proxyId)) {
+						owner.proxyId = replacementForFailedProxy(owner.proxyId);
+						tr.set(cdcTagOwnerKeyFor(tag), cdcTagOwnerValue(owner));
+						repairedAssignment = true;
+					}
 				}
 			}
 			TraceEvent("CDCProxyAssignmentsScanned")

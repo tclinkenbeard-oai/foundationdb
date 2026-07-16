@@ -133,6 +133,84 @@ class NativeCdcEndToEndWorkload : public TestWorkload {
 		}
 	}
 
+	Future<std::pair<Tag, CDCTagOwner>> getStreamTagOwner(Database cx, CDCStreamId streamId) {
+		Transaction tr(cx);
+		while (true) {
+			Error err;
+			try {
+				tr.setOption(FDBTransactionOptions::READ_LOCK_AWARE);
+				tr.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
+				RangeResult history =
+				    co_await tr.getRange(cdcTagHistoryRangeFor(streamId), 1, Snapshot::False, Reverse::True);
+				ASSERT_EQ(history.size(), 1);
+				const Tag tag = decodeCDCTagHistoryKey(history.front().key).tag;
+				Optional<Value> owner = co_await tr.get(cdcTagOwnerKeyFor(tag));
+				ASSERT(owner.present());
+				co_return std::make_pair(tag, decodeCDCTagOwnerValue(owner.get()));
+			} catch (Error& e) {
+				err = e;
+			}
+			co_await tr.onError(err);
+		}
+	}
+
+	Future<Void> clearTagOwnerIndex(Database cx, CDCStreamId splitStreamId, UID splitProxyId) {
+		Transaction tr(cx);
+		while (true) {
+			Error err;
+			try {
+				tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+				tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+				tr.clear(cdcTagOwnerKeys);
+				tr.clear(cdcTagOwnersInitializedKey);
+				tr.clear(cdcProxyRangeFor(splitStreamId));
+				tr.set(cdcProxyKeyFor(splitStreamId, splitProxyId), Value());
+				co_await tr.commit();
+				co_return;
+			} catch (Error& e) {
+				err = e;
+			}
+			co_await tr.onError(err);
+		}
+	}
+
+	Future<Void> clearTagOwner(Database cx, Tag tag) {
+		Transaction tr(cx);
+		while (true) {
+			Error err;
+			try {
+				tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+				tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+				tr.clear(cdcTagOwnerKeyFor(tag));
+				co_await tr.commit();
+				co_return;
+			} catch (Error& e) {
+				err = e;
+			}
+			co_await tr.onError(err);
+		}
+	}
+
+	Future<Void> validateEmptyTagOwnerIndex(Database cx) {
+		Transaction tr(cx);
+		while (true) {
+			Error err;
+			try {
+				tr.setOption(FDBTransactionOptions::READ_LOCK_AWARE);
+				tr.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
+				RangeResult owners = co_await tr.getRange(cdcTagOwnerKeys, 1);
+				Optional<Value> initialized = co_await tr.get(cdcTagOwnersInitializedKey);
+				ASSERT(owners.empty());
+				ASSERT(initialized.present());
+				ASSERT_EQ(decodeCDCTagOwnersInitializedValue(initialized.get()), 0);
+				co_return;
+			} catch (Error& e) {
+				err = e;
+			}
+			co_await tr.onError(err);
+		}
+	}
+
 	Future<Void> acknowledgeDurablyWithoutProxy(Database cx, CDCStreamId streamId, Version consumedThrough) {
 		Transaction tr(cx);
 		while (true) {
@@ -452,6 +530,25 @@ class NativeCdcEndToEndWorkload : public TestWorkload {
 		const std::vector<CDCProxyInterface> originalProxies = cx->clientInfo->get().cdcProxies;
 		ASSERT_EQ(originalProxies.size(), 2);
 		ASSERT(std::find(originalProxies.begin(), originalProxies.end(), original) != originalProxies.end());
+		const auto [tag, initialOwner] = co_await getStreamTagOwner(cx, streamId);
+		ASSERT_EQ(initialOwner.proxyId, original.id());
+		ASSERT_EQ(initialOwner.activeStreamCount, static_cast<uint64_t>(streams.size()) + 1);
+
+		auto otherOriginal = std::find_if(originalProxies.begin(), originalProxies.end(), [&](const auto& proxy) {
+			return proxy.id() != original.id();
+		});
+		ASSERT(otherOriginal != originalProxies.end());
+		co_await clearTagOwnerIndex(cx, streamId, otherOriginal->id());
+		const Key backfillName = "native-cdc-e2e/proxy-replacement-backfill"_sr;
+		const CDCRegisterStreamReply backfillReply = co_await timeoutError(
+		    otherOriginal->registerStream.getReply(CDCRegisterStreamRequest(backfillName, keys)), operationTimeout);
+		const CDCStreamId backfillStreamId = backfillReply.streamId;
+		ASSERT_EQ((co_await timeoutError(waitForAssignedProxy(cx, backfillStreamId), operationTimeout)).id(),
+		          original.id());
+		const auto [backfillTag, backfillOwner] = co_await getStreamTagOwner(cx, backfillStreamId);
+		ASSERT_EQ(backfillTag, tag);
+		ASSERT_EQ(backfillOwner.proxyId, original.id());
+		ASSERT_EQ(backfillOwner.activeStreamCount, initialOwner.activeStreamCount + 1);
 		Future<Void> publications = waitForIndependentProxyPublications(cx, originalProxies);
 
 		std::vector<Future<Void>> halts;
@@ -466,9 +563,51 @@ class NativeCdcEndToEndWorkload : public TestWorkload {
 		CDCProxyInterface replacement =
 		    co_await timeoutError(waitForAssignedProxy(cx, streamId, original.id()), operationTimeout);
 		ASSERT_NE(original.id(), replacement.id());
+		ASSERT_EQ(
+		    (co_await timeoutError(waitForAssignedProxy(cx, backfillStreamId, original.id()), operationTimeout)).id(),
+		    replacement.id());
+		if (!streams.empty()) {
+			const CDCStreamId initialStreamId = streams.front().consumer->position().streamId;
+			ASSERT_EQ(
+			    (co_await timeoutError(waitForAssignedProxy(cx, initialStreamId, original.id()), operationTimeout))
+			        .id(),
+			    replacement.id());
+		}
+		const auto [replacementTag, replacementOwner] = co_await getStreamTagOwner(cx, streamId);
+		ASSERT_EQ(replacementTag, tag);
+		ASSERT_EQ(replacementOwner.proxyId, replacement.id());
+		ASSERT_EQ(replacementOwner.activeStreamCount, backfillOwner.activeStreamCount);
+
+		const std::vector<CDCProxyInterface> replacementProxies = cx->clientInfo->get().cdcProxies;
+		auto otherReplacement = std::find_if(replacementProxies.begin(),
+		                                     replacementProxies.end(),
+		                                     [&](const auto& proxy) { return proxy.id() != replacement.id(); });
+		ASSERT(otherReplacement != replacementProxies.end());
+		co_await clearTagOwner(cx, tag);
+		const Key sharedName = "native-cdc-e2e/proxy-replacement-shared"_sr;
+		const CDCRegisterStreamReply sharedReply = co_await timeoutError(
+		    otherReplacement->registerStream.getReply(CDCRegisterStreamRequest(sharedName, keys)), operationTimeout);
+		const CDCStreamId sharedStreamId = sharedReply.streamId;
+		ASSERT_EQ((co_await timeoutError(waitForAssignedProxy(cx, sharedStreamId), operationTimeout)).id(),
+		          replacement.id());
+		const auto [sharedTag, sharedOwner] = co_await getStreamTagOwner(cx, sharedStreamId);
+		ASSERT_EQ(sharedTag, tag);
+		ASSERT_EQ(sharedOwner.proxyId, replacement.id());
+		ASSERT_EQ(sharedOwner.activeStreamCount, replacementOwner.activeStreamCount + 1);
 
 		const Version committed = co_await writeValue(cx, key, value);
 		co_await consumeThroughValue(consumer, committed, key, value);
+		co_await clearTagOwner(cx, tag);
+		co_await timeoutError(removeNativeCdcStreamClient(cx, sharedName), operationTimeout);
+		const auto [afterSharedTag, afterSharedOwner] = co_await getStreamTagOwner(cx, streamId);
+		ASSERT_EQ(afterSharedTag, tag);
+		ASSERT_EQ(afterSharedOwner.proxyId, replacement.id());
+		ASSERT_EQ(afterSharedOwner.activeStreamCount, replacementOwner.activeStreamCount);
+		co_await timeoutError(removeNativeCdcStreamClient(cx, backfillName), operationTimeout);
+		const auto [afterBackfillTag, afterBackfillOwner] = co_await getStreamTagOwner(cx, streamId);
+		ASSERT_EQ(afterBackfillTag, tag);
+		ASSERT_EQ(afterBackfillOwner.proxyId, replacement.id());
+		ASSERT_EQ(afterBackfillOwner.activeStreamCount, initialOwner.activeStreamCount);
 		co_await timeoutError(removeNativeCdcStreamClient(cx, name), operationTimeout);
 	}
 
@@ -1394,6 +1533,9 @@ class NativeCdcEndToEndWorkload : public TestWorkload {
 			co_await validateRetiredCleanupAcrossRecovery(cx);
 		} else {
 			co_await timeoutError(waitForRetiredTagCleanup(cx), operationTimeout);
+			if (testProxyReplacement) {
+				co_await timeoutError(validateEmptyTagOwnerIndex(cx), operationTimeout);
+			}
 		}
 	}
 
