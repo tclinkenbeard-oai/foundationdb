@@ -2474,13 +2474,20 @@ Future<Void> tLogPeekStream(TLogData* self, TLogPeekStreamRequest req, Reference
 
 	Version begin = req.begin;
 	bool onlySpilled = false;
-	req.reply.setByteLimit(std::min(SERVER_KNOBS->MAXIMUM_PEEK_BYTES, req.limitBytes));
+	const int replyByteLimit = tLogPeekReplyByteLimit(req.tag, req.limitBytes);
+	req.reply.setByteLimit(replyByteLimit > 0 ? 1 : std::min(SERVER_KNOBS->MAXIMUM_PEEK_BYTES, req.limitBytes));
 	while (true) {
 		TLogPeekStreamReply reply;
 		Promise<TLogPeekReply> promise;
 		Future<TLogPeekReply> future(promise.getFuture());
 		try {
-			co_await (req.reply.onReady() && store(reply.rep, future) &&
+			Future<Void> ready = req.reply.onReady();
+			// A capped CDC stream permits one prefetched reply. Do not build another reply at the TLog while that
+			// window is full; non-CDC streams preserve their existing peek/ready overlap.
+			if (replyByteLimit > 0) {
+				co_await ready;
+			}
+			co_await (ready && store(reply.rep, future) &&
 			          tLogPeekMessages(promise,
 			                           self,
 			                           logData,
@@ -2491,7 +2498,7 @@ Future<Void> tLogPeekStream(TLogData* self, TLogPeekStreamRequest req, Reference
 			                           Optional<std::pair<UID, int>>(),
 			                           req.end,
 			                           req.returnEmptyIfStopped,
-			                           0));
+			                           replyByteLimit));
 
 			reply.rep.begin = begin;
 			req.reply.send(reply);
@@ -2510,7 +2517,8 @@ Future<Void> tLogPeekStream(TLogData* self, TLogPeekStreamRequest req, Reference
 			    .detail("PeerAddr", req.reply.getEndpoint().getPrimaryAddress())
 			    .detail("PeerAddress", req.reply.getEndpoint().getPrimaryAddress());
 
-			if (e.code() == error_code_end_of_stream || e.code() == error_code_operation_obsolete) {
+			if (e.code() == error_code_end_of_stream || e.code() == error_code_operation_obsolete ||
+			    e.code() == error_code_cdc_tlog_peek_reply_too_large) {
 				req.reply.sendError(e);
 				co_return;
 			} else {
@@ -4227,6 +4235,8 @@ TEST_CASE("/NativeCDC/TLogPeekReplyLimit") {
 	ASSERT(tLogPeekReplyByteLimit(Tag(tagLocalityCDC, 0), SERVER_KNOBS->MAXIMUM_PEEK_BYTES) ==
 	       SERVER_KNOBS->MAXIMUM_PEEK_BYTES);
 	ASSERT(tLogPeekReplyByteLimit(Tag(tagLocalityCDC, 0), 4096) == std::min(4096, SERVER_KNOBS->MAXIMUM_PEEK_BYTES));
+	ASSERT(tLogPeekReplyByteLimit(Tag(tagLocalityCDC, 0), std::numeric_limits<int>::max()) ==
+	       SERVER_KNOBS->MAXIMUM_PEEK_BYTES);
 	ASSERT(tLogPeekReplyByteLimit(Tag(tagLocalityLogRouter, 0), SERVER_KNOBS->MAXIMUM_PEEK_BYTES) == 0);
 	ASSERT(tLogPeekReplyByteLimit(Tag(tagLocalityTxs, 0), SERVER_KNOBS->MAXIMUM_PEEK_BYTES) == 0);
 	return Void();

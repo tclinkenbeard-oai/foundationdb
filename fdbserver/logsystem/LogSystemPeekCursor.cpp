@@ -41,10 +41,17 @@ Future<Void> tryEstablishPeekStreamImpl(ServerPeekCursor* self) {
 	co_await IFailureMonitor::failureMonitor().onStateEqual(
 	    self->interf->get().interf().peekStreamMessages.getEndpoint(), FailureStatus(false));
 
+	if (self->tag.locality == tagLocalityCDC && self->replyByteLimit > 0 &&
+	    (!self->interf->get().present() || self->interf->get().interf().peekStreamMessages.getEndpoint().isLocal())) {
+		// The interface can change while waiting on the failure monitor. Let the in-flight getMore loop choose the
+		// capped unary fallback before establishing a local reply stream.
+		co_return;
+	}
+
 	auto req = TLogPeekStreamRequest(self->messageVersion.version,
 	                                 self->tag,
 	                                 self->returnIfBlocked,
-	                                 std::numeric_limits<int>::max(),
+	                                 self->replyByteLimit > 0 ? self->replyByteLimit : std::numeric_limits<int>::max(),
 	                                 self->end.version,
 	                                 self->returnEmptyIfStopped);
 	self->peekReplyStream = self->interf->get().interf().peekStreamMessages.getReplyStream(req);
@@ -408,8 +415,19 @@ Future<Void> serverPeekParallelGetMore(ServerPeekCursor* self, TaskPriority task
 	return serverPeekParallelGetMoreImpl(self, taskID);
 }
 
+Future<Void> serverPeekGetMore(ServerPeekCursor* self, TaskPriority taskID);
+
 Future<Void> serverPeekStreamGetMoreImpl(ServerPeekCursor* self, TaskPriority taskID) {
 	while (true) {
+		if (self->tag.locality == tagLocalityCDC && self->replyByteLimit > 0 && self->interf->get().present() &&
+		    self->interf->get().interf().peekStreamMessages.getEndpoint().isLocal()) {
+			// getMore() is still in flight, so its outer locality check will not run before this loop retries.
+			// Switch directly to a capped unary peek instead of establishing an unbounded local reply stream.
+			self->peekReplyStream.reset();
+			CODE_PROBE(true, "Native CDC switches an in-flight remote peek stream to a capped local peek");
+			co_await serverPeekGetMore(self, taskID);
+			co_return;
+		}
 		Optional<Error> err;
 		try {
 			Version expectedBegin = self->messageVersion.version;
@@ -563,19 +581,30 @@ Future<Void> ServerPeekCursor::getMore(TaskPriority taskID) {
 	}
 	if (!more.isValid() || more.isReady()) {
 		if (!hasMessage()) {
-			// A consumed reply is no longer useful. Release its arena before the next capped reply arrives so one
-			// ServerPeekCursor retains at most one reply window at a time.
+			// A consumed reply is no longer useful. Release its arena before installing the next reply; capped CDC
+			// streaming may additionally retain one prefetched reply in the stream queue.
 			results = TLogPeekReply();
 			results.maxKnownVersion = 0;
 			results.minKnownCommittedVersion = 0;
 			rd = ArenaReader(results.arena, results.messages, Unversioned());
 		}
-		if (usePeekStream &&
-		    (tag.locality >= 0 || tag.locality == tagLocalityLogRouter || tag.locality == tagLocalityRemoteLog)) {
+		const bool cappedCDC = tag.locality == tagLocalityCDC && replyByteLimit > 0;
+		const bool cappedCDCStream = cappedCDC && interf && interf->get().present() &&
+		                             !interf->get().interf().peekStreamMessages.getEndpoint().isLocal();
+		if (!cappedCDCStream && cappedCDC && peekReplyStream.present()) {
+			// An interface change can move a CDC reader to a local endpoint between getMore calls. Local streams do not
+			// observe acknowledgement backpressure, so stop the old stream before falling back to a capped unary peek.
+			peekReplyStream.reset();
+		}
+		if (cappedCDCStream || (usePeekStream && (tag.locality >= 0 || tag.locality == tagLocalityLogRouter ||
+		                                          tag.locality == tagLocalityRemoteLog))) {
+			CODE_PROBE(cappedCDCStream, "Native CDC uses a bounded remote TLog peek stream");
 			more = serverPeekStreamGetMore(this, taskID);
-		} else if (parallelGetMore || onlySpilled || !futureResults.empty()) {
+		} else if (!cappedCDC && (parallelGetMore || onlySpilled || !futureResults.empty())) {
 			more = serverPeekParallelGetMore(this, taskID);
 		} else {
+			// A local CDC endpoint stays on capped unary peeks even after a spilled reply; parallel getMore could
+			// retain more reply arenas than the two-window CDC reservation covers.
 			more = serverPeekGetMore(this, taskID);
 		}
 	}
@@ -638,6 +667,11 @@ Version ServerPeekCursor::getMinKnownCommittedVersion() const {
 }
 
 int64_t ServerPeekCursor::getMaxRetainedReplyCount() const {
+	if (tag.locality == tagLocalityCDC && replyByteLimit > 0) {
+		// A stream acknowledges the current reply on delivery, so the TLog can send one prefetched reply while this
+		// cursor still retains its current arena.
+		return 2;
+	}
 	return parallelGetMore || onlySpilled || !futureResults.empty()
 	           ? std::max<int64_t>(1, SERVER_KNOBS->PARALLEL_GET_MORE_REQUESTS + 1)
 	           : 1;
@@ -1654,6 +1688,9 @@ TEST_CASE("/NativeCDC/ReplayPeekReplyAccounting") {
 	auto noPrefetch = makeReference<ReplayMultiCursor>(epochs, std::vector<LogMessageVersion>{ 50 }, false);
 	ASSERT_EQ(noPrefetch->getMaxRetainedReplyCount(), 3);
 	noPrefetch->setReplyByteLimit(4096);
+	ASSERT_EQ(noPrefetch->getMaxRetainedReplyCount(), 6);
+	threeServers.front()->onlySpilled = true;
+	ASSERT_EQ(noPrefetch->getMaxRetainedReplyCount(), 6);
 	for (const auto& cursor : twoServers) {
 		ASSERT_EQ(cursor->replyByteLimit, 4096);
 	}

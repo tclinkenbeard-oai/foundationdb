@@ -487,44 +487,55 @@ mutations to the registered range and stores versioned mutation batches in a
 per-stream in-memory buffer.
 
 All raw peek windows and stream buffers owned by one CDC proxy share a
-`CDC_PROXY_BUFFER_BYTES` budget (1 GB by default). A replicated log read may
-retain one separately capped reply arena from every candidate TLog it consults.
-CDC history cursors therefore disable cross-generation constructor prefetch,
-report the maximum number of reply arenas one active generation can retain,
-and reserve that count times `MAXIMUM_PEEK_BYTES` before issuing a peek. The
-proxy marks these delivery cursors with the same per-reply limit; recovery
-cursors remain uncapped so that transaction-system replay is not constrained
-by a delivery memory knob. The pass also reserves a bounded materialization
-window. It retains the aggregate
-raw reservation while filtering and copying, then releases it and transfers
-only accepted filtered bytes to the stream buffers. Acknowledgement or stream
-removal releases those retained permits. The usable retained-batch capacity is
-the configured CDC budget minus this topology-dependent raw reservation; a
-configuration too small to hold both fails the affected consume with
-`server_overloaded`. This applies
-backpressure before ordinary peek batches arrive, rather than allowing each
-stream, replica reply, received batch, or filtered expansion to independently
+`CDC_PROXY_BUFFER_BYTES` budget (1 GB by default). A remote CDC delivery
+cursor uses a persistent `ReplyPromiseStream` and permits one prefetched,
+capped reply in addition to the reply arena currently being filtered. A
+replicated log read may retain both windows for every candidate TLog it
+consults. CDC history cursors therefore disable cross-generation constructor
+prefetch, report the maximum number of reply arenas one active generation can
+retain, and reserve that count times `MAXIMUM_PEEK_BYTES` before establishing
+the stream. This raw reservation remains held for the full cursor lifetime.
+Local TLog endpoints use the capped unary peek fallback, since local reply
+streams do not apply remote acknowledgement backpressure. Recovery cursors
+remain uncapped so that transaction-system replay is not constrained by a
+delivery memory knob.
+
+Each pass also reserves a bounded materialization window while filtering and
+copying, then transfers only accepted filtered bytes to the stream buffers.
+Acknowledgement or stream removal releases those retained permits. The usable
+retained-batch capacity is the configured CDC budget minus the
+topology-dependent raw reservation; a configuration too small to hold both
+fails the affected consume with `server_overloaded`. This applies backpressure
+before ordinary peek batches arrive, rather than allowing each stream,
+replica reply, prefetched batch, or filtered expansion to independently
 overshoot the proxy limit. A slow consumer does not require the proxy to buffer
-its entire retained history in memory: durable acknowledgement state and tagged
-TLog retention are the source of resumability, while the proxy buffer is a
-delivery optimization.
+its entire retained history in memory: durable acknowledgement state and
+tagged TLog retention are the source of resumability, while the proxy buffer
+is a delivery optimization.
 
 One tagged TLog message can match many overlapping streams. The proxy estimates
-that expansion per stream and commit version, materializes only a subset that
-fits the current bounded pass, and reopens the tag cursor for the remaining
-streams. It never requests raw-plus-retained permits beyond
-`CDC_PROXY_BUFFER_BYTES`. If the filtered mutations for one stream at one
-commit version exceed the capacity remaining after the raw peek reservation,
-that consume fails with `server_overloaded`; operators must configure the
-budget to hold both the largest raw peek and the largest supported filtered
-transaction for one stream.
+that expansion per stream and commit version and materializes only a subset
+that fits the current bounded pass. If any same-tag stream still needs that
+version, the cursor is reopened at the shared minimum rather than advancing
+past data that was not materialized. When the last consume completes, the proxy
+may keep only the bounded raw-reply reservation for one blocking-peek
+interval so a back-to-back consume can reuse the cursor. Topology or frontier
+changes, committed-version changes, buffer contention, and the idle timeout
+discard the cursor and its raw reservation before safely reopening. It never
+requests raw-plus-retained permits beyond `CDC_PROXY_BUFFER_BYTES`. If the filtered
+mutations for one stream at one commit version exceed the capacity remaining
+after the raw peek reservation, that consume fails with `server_overloaded`;
+operators must configure the budget to hold both the largest raw peek and the
+largest supported filtered transaction for one stream.
 
 The TLog applies `MAXIMUM_PEEK_BYTES` at complete commit-version boundaries.
 When several individually valid versions would exceed one raw reply, it
 returns the prefix and leaves the next version for a later peek. It reports an
-oversized CDC peek only when one complete version cannot fit by itself; a
-multi-version batch must not permanently overload a stream merely because the
-ordinary TLog batching target is larger than the CDC reply budget.
+oversized CDC peek only when one complete version cannot fit by itself; the
+stream forwards that error to the proxy so the affected consume fails with the
+same `server_overloaded` semantics as a unary peek. A multi-version batch must
+not permanently overload a stream merely because the ordinary TLog batching
+target is larger than the CDC reply budget.
 
 A consume operation supplies a cursor. The proxy returns buffered or newly
 peeked data after the cursor position and a position through which the

@@ -192,7 +192,7 @@ bool hasCompleteLogSystemConfig(LogSystemConfig const& config) {
 	return config.expectedLogSets > 0 && config.tLogs.size() == static_cast<size_t>(config.expectedLogSets);
 }
 
-enum class CDCBufferTagPassResult { RETRY, WAIT_FOR_COMMIT, STOP };
+enum class CDCBufferTagPassResult { CONTINUE, RETRY, WAIT_FOR_COMMIT, STOP };
 
 Optional<CDCBufferPassLimits> calculateBufferPassLimits(int64_t bufferBytes,
                                                         int64_t maximumPeekBytes,
@@ -371,7 +371,6 @@ class CDCProxy {
 	                                                          Reference<IReplayPeekCursor> cursor,
 	                                                          Version throughVersion,
 	                                                          CDCBufferSelection const& selection,
-	                                                          int64_t rawPeekReservation,
 	                                                          FlowLock::Releaser& reservation,
 	                                                          int64_t bufferLimit);
 	Future<Void> rotateContendedPeek();
@@ -952,10 +951,9 @@ Future<CDCBufferTagPassResult> CDCProxy::materializeBufferSelection(Reference<CD
                                                                     Reference<IReplayPeekCursor> cursor,
                                                                     Version throughVersion,
                                                                     CDCBufferSelection const& selection,
-                                                                    int64_t rawPeekReservation,
                                                                     FlowLock::Releaser& reservation,
                                                                     int64_t bufferLimit) {
-	const int64_t materializationReservation = reservation.remaining - rawPeekReservation;
+	const int64_t materializationReservation = reservation.remaining;
 	ASSERT_GE(materializationReservation, 0);
 	if (selection.selectedBytes <= materializationReservation) {
 		reservation.release(materializationReservation - selection.selectedBytes);
@@ -992,7 +990,7 @@ Future<CDCBufferTagPassResult> CDCProxy::materializeBufferSelection(Reference<CD
 	CODE_PROBE(materializedBytes < selection.selectedBytes,
 	           "CDC proxy drops acknowledged mutations while waiting for buffer capacity",
 	           probe::decoration::rare);
-	ASSERT_GE(reservation.remaining, rawPeekReservation + materializedBytes);
+	ASSERT_GE(reservation.remaining, materializedBytes);
 
 	int64_t acceptedBytes = 0;
 	for (auto& [streamId, batch] : batches) {
@@ -1010,15 +1008,16 @@ Future<CDCBufferTagPassResult> CDCProxy::materializeBufferSelection(Reference<CD
 	ASSERT_LE(bufferedBytes, bufferLimit);
 	ASSERT_LE(bufferLock.activePermits(), bufferLimit);
 	advanceTagBufferedThrough(tag, throughVersion, selection.selectedStreamIds);
-	// Every raw cursor arena is covered by rawPeekReservation only for this pass. Reopen from the shared minimum
-	// after releasing it so no cursor response remains live outside the proxy memory budget.
-	co_return CDCBufferTagPassResult::RETRY;
+	co_return CDCBufferTagPassResult::CONTINUE;
 }
 
 Future<CDCBufferTagPassResult> CDCProxy::bufferTagPass(Reference<CDCBufferedTag> tag, Version begin) {
 	const int64_t bufferLimit = SERVER_KNOBS->CDC_PROXY_BUFFER_BYTES;
 	Reference<LogSystemConsumer> consumer = logSystem->get();
 	Future<Void> logSystemChanged = logSystem->onChange();
+	// Keep the raw-reply reservation alive until after the cursor is destroyed. A capped streaming cursor can retain
+	// its current reply and one prefetched reply from every candidate TLog between materialization passes.
+	FlowLock::Releaser rawReservation;
 	// CDC ReplayMultiCursor instances disable constructor prefetch, so constructing this cursor cannot issue a peek
 	// before the proxy has reserved memory for every reply arena that its replicated read may retain.
 	Reference<IReplayPeekCursor> cursor = consumer->peekSingle(id, begin, tag->tag, {});
@@ -1048,57 +1047,117 @@ Future<CDCBufferTagPassResult> CDCProxy::bufferTagPass(Reference<CDCBufferedTag>
 	if (capacity.index() == 2) {
 		co_return CDCBufferTagPassResult::STOP;
 	}
-	FlowLock::Releaser reservation(bufferLock, passReservation);
+	rawReservation = FlowLock::Releaser(bufferLock, rawPeekReservation);
+	FlowLock::Releaser reservation(bufferLock, preferredBufferedBatch);
 	recordBufferUsage();
 	// If capacity and a generation change became ready together, discard the cursor built from the old topology.
 	if (logSystemChanged.isReady()) {
 		co_return CDCBufferTagPassResult::RETRY;
 	}
-	if (!cursor->hasMessage()) {
-		// Blocking peeks hold a response reservation. Once another tag queues for capacity, rotate this
-		// reader after one blocking-peek interval so an idle tag cannot monopolize the shared budget.
-		try {
-			auto result = co_await race(cursor->getMore(TaskPriority::TLogPeekReply),
-			                            logSystemChanged,
-			                            tag->stopped.onTrigger(),
-			                            tag->refresh.onTrigger(),
-			                            rotateContendedPeek());
-			if (result.index() == 1 || result.index() == 3 || result.index() == 4) {
-				co_return CDCBufferTagPassResult::RETRY;
-			}
-			if (result.index() == 2) {
-				co_return CDCBufferTagPassResult::STOP;
-			}
-		} catch (Error& e) {
-			if (e.code() != error_code_cdc_tlog_peek_reply_too_large) {
-				throw;
-			}
-			markTagStreamsBufferLimitExceeded(tag, begin);
+	while (tag->active) {
+		if (logSystemChanged.isReady()) {
 			co_return CDCBufferTagPassResult::RETRY;
 		}
-	}
-	// A newly constructed replay cursor can already contain messages, especially after log-generation
-	// changes. Initialize its reader even when getMore() was unnecessary.
-	cursor->setProtocolVersion(g_network->protocolVersion());
-	latestCommittedVersion = std::max(latestCommittedVersion, cursor->getMinKnownCommittedVersion());
-	if (cursor->popped() > begin) {
-		markPoppedTagStreamsTooOld(tag, cursor->popped());
-		co_return CDCBufferTagPassResult::RETRY;
-	}
+		if (!cursor->hasMessage()) {
+			// Blocking peeks hold a response reservation. Once another tag queues for capacity, rotate this
+			// reader after one blocking-peek interval so an idle tag cannot monopolize the shared budget.
+			try {
+				auto result = co_await race(cursor->getMore(TaskPriority::TLogPeekReply),
+				                            logSystemChanged,
+				                            tag->stopped.onTrigger(),
+				                            tag->refresh.onTrigger(),
+				                            rotateContendedPeek());
+				if (result.index() == 1 || result.index() == 3 || result.index() == 4) {
+					co_return CDCBufferTagPassResult::RETRY;
+				}
+				if (result.index() == 2) {
+					co_return CDCBufferTagPassResult::STOP;
+				}
+			} catch (Error& e) {
+				if (e.code() != error_code_cdc_tlog_peek_reply_too_large) {
+					throw;
+				}
+				markTagStreamsBufferLimitExceeded(tag, begin);
+				co_return CDCBufferTagPassResult::RETRY;
+			}
+		}
+		// A newly constructed replay cursor can already contain messages, especially after log-generation
+		// changes. Initialize its reader even when getMore() was unnecessary.
+		cursor->setProtocolVersion(g_network->protocolVersion());
+		latestCommittedVersion = std::max(latestCommittedVersion, cursor->getMinKnownCommittedVersion());
+		if (cursor->popped() > begin) {
+			markPoppedTagStreamsTooOld(tag, cursor->popped());
+			co_return CDCBufferTagPassResult::RETRY;
+		}
 
-	const Version peekThroughVersion = cursor->hasMessage() ? cursor->version().version : cursor->version().version - 1;
-	const Version throughVersion = committedPeekThrough(peekThroughVersion, cursor->getMinKnownCommittedVersion());
-	CODE_PROBE(throughVersion < peekThroughVersion, "CDC proxy waits for peeked mutations to become committed");
-	if (throughVersion < begin) {
-		co_return CDCBufferTagPassResult::WAIT_FOR_COMMIT;
+		const Version peekThroughVersion =
+		    cursor->hasMessage() ? cursor->version().version : cursor->version().version - 1;
+		const Version throughVersion = committedPeekThrough(peekThroughVersion, cursor->getMinKnownCommittedVersion());
+		CODE_PROBE(throughVersion < peekThroughVersion, "CDC proxy waits for peeked mutations to become committed");
+		if (throughVersion < begin) {
+			co_return CDCBufferTagPassResult::WAIT_FOR_COMMIT;
+		}
+		const CDCBufferSelection selection =
+		    selectBufferCandidatesForTag(tag, cursor, throughVersion, preferredBufferedBatch, hardBufferedBatchLimit);
+		if (selection.selectedStreamIds.empty()) {
+			co_return CDCBufferTagPassResult::RETRY;
+		}
+		const CDCBufferTagPassResult result =
+		    co_await materializeBufferSelection(tag, cursor, throughVersion, selection, reservation, bufferLimit);
+		if (result != CDCBufferTagPassResult::CONTINUE) {
+			co_return result;
+		}
+
+		Optional<Version> nextBegin = nextTagReadVersion(tag);
+		if (!nextBegin.present()) {
+			// Materialization wakes a waiting consume synchronously, so the last reader can drop demand before its
+			// next poll arrives. Keep only the bounded raw-reply reservation for one blocking-peek interval and let
+			// a back-to-back consume reuse the cursor. Release it immediately when another tag needs capacity.
+			if (bufferLock.waiters() > 0) {
+				co_return CDCBufferTagPassResult::RETRY;
+			}
+			auto nextDemand = co_await race(tag->refresh.onTrigger(),
+			                                logSystemChanged,
+			                                tag->stopped.onTrigger(),
+			                                peekCapacityContended.onTrigger(),
+			                                delay(SERVER_KNOBS->BLOCKING_PEEK_TIMEOUT));
+			if (nextDemand.index() == 2) {
+				co_return CDCBufferTagPassResult::STOP;
+			}
+			if (nextDemand.index() != 0) {
+				co_return CDCBufferTagPassResult::RETRY;
+			}
+			nextBegin = nextTagReadVersion(tag);
+		}
+		if (!nextBegin.present() || nextBegin.get() <= throughVersion ||
+		    (!cursor->hasMessage() && cursor->isExhausted())) {
+			// An unselected stream still needs this version, or demand/frontier changed. Reopen from the shared minimum
+			// instead of advancing a persistent cursor past data that was intentionally not materialized.
+			co_return CDCBufferTagPassResult::RETRY;
+		}
+		begin = nextBegin.get();
+		cursor->advanceTo(LogMessageVersion(begin));
+		CODE_PROBE(true, "CDC proxy reuses a bounded tag cursor across complete versions");
+
+		if (bufferLock.available() < preferredBufferedBatch) {
+			CODE_PROBE(true, "CDC proxy rotates a streaming cursor under shared buffer backpressure");
+			peekCapacityContended.trigger();
+			co_return CDCBufferTagPassResult::RETRY;
+		}
+		auto nextCapacity = co_await race(bufferLock.take(TaskPriority::TLogPeekReply, preferredBufferedBatch),
+		                                  logSystemChanged,
+		                                  tag->stopped.onTrigger(),
+		                                  tag->refresh.onTrigger());
+		if (nextCapacity.index() == 1 || nextCapacity.index() == 3) {
+			co_return CDCBufferTagPassResult::RETRY;
+		}
+		if (nextCapacity.index() == 2) {
+			co_return CDCBufferTagPassResult::STOP;
+		}
+		reservation = FlowLock::Releaser(bufferLock, preferredBufferedBatch);
+		recordBufferUsage();
 	}
-	const CDCBufferSelection selection =
-	    selectBufferCandidatesForTag(tag, cursor, throughVersion, preferredBufferedBatch, hardBufferedBatchLimit);
-	if (selection.selectedStreamIds.empty()) {
-		co_return CDCBufferTagPassResult::RETRY;
-	}
-	co_return co_await materializeBufferSelection(
-	    tag, cursor, throughVersion, selection, rawPeekReservation, reservation, bufferLimit);
+	co_return CDCBufferTagPassResult::STOP;
 }
 
 Future<Void> CDCProxy::bufferTag(Reference<CDCBufferedTag> tag) {
@@ -1910,7 +1969,15 @@ TEST_CASE("/NativeCDC/ProxyBufferPassLimits") {
 	ASSERT_EQ(replicated.get().hardBufferedBytes, 700);
 	ASSERT_EQ(replicated.get().reservationBytes, 400);
 
+	Optional<CDCBufferPassLimits> streamingReplicated = calculateBufferPassLimits(1000, 100, 6);
+	ASSERT(streamingReplicated.present());
+	ASSERT_EQ(streamingReplicated.get().rawReplyBytes, 600);
+	ASSERT_EQ(streamingReplicated.get().preferredBufferedBytes, 100);
+	ASSERT_EQ(streamingReplicated.get().hardBufferedBytes, 400);
+	ASSERT_EQ(streamingReplicated.get().reservationBytes, 700);
+
 	ASSERT(!calculateBufferPassLimits(300, 100, 3).present());
+	ASSERT(!calculateBufferPassLimits(600, 100, 6).present());
 	ASSERT(!calculateBufferPassLimits(std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::max(), 2)
 	            .present());
 	return Void();

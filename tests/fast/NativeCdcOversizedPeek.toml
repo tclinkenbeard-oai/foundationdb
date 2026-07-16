@@ -1,6 +1,10 @@
 [configuration]
 config = 'single'
 singleRegion = true
+# Keep TLog and CDC-proxy workers distinct so oversized-stream forwarding is exercised.
+desiredTLogCount = 2
+machineCount = 8
+processesPerMachine = 1
 buggify = false
 faultInjection = false
 
