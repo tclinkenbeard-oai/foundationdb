@@ -1836,14 +1836,14 @@ TEST_CASE("/SystemData/SerDes/LogsValue") {
 	std::vector<std::pair<UID, NetworkAddress>> oldLogs = { { UID(2, 1),
 		                                                      NetworkAddress(IPAddress(0x0a000002), 4500) } };
 	LocalityData logLocality;
-	logLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("current-process"_sr));
-	logLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("current-zone"_sr));
+	logLocality.set(LocalityData::keyProcessId, "current-process"_sr);
+	logLocality.set(LocalityData::keyZoneId, "current-zone"_sr);
 	LocalityData unavailableLogLocality;
-	unavailableLogLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("unavailable-process"_sr));
-	unavailableLogLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("unavailable-zone"_sr));
+	unavailableLogLocality.set(LocalityData::keyProcessId, "unavailable-process"_sr);
+	unavailableLogLocality.set(LocalityData::keyZoneId, "unavailable-zone"_sr);
 	LocalityData oldLogLocality;
-	oldLogLocality.set(LocalityData::keyProcessId, Standalone<StringRef>("old-process"_sr));
-	oldLogLocality.set(LocalityData::keyZoneId, Standalone<StringRef>("old-zone"_sr));
+	oldLogLocality.set(LocalityData::keyProcessId, "old-process"_sr);
+	oldLogLocality.set(LocalityData::keyZoneId, "old-zone"_sr);
 	std::map<UID, LocalityData> logLocalities = { { UID(1, 1), logLocality },
 		                                          { UID(1, 2), unavailableLogLocality },
 		                                          { UID(2, 1), oldLogLocality } };
