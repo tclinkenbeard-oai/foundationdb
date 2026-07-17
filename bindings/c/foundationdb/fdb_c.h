@@ -70,6 +70,8 @@
 extern "C" {
 #endif
 
+/* Keep typedef syntax in this public C header. */
+
 DLLEXPORT const char* fdb_get_error(fdb_error_t code);
 
 DLLEXPORT fdb_bool_t fdb_error_predicate(int predicate_test, fdb_error_t code);
@@ -556,6 +558,14 @@ DLLEXPORT WARN_UNUSED_RESULT FDBFuture* fdb_transaction_get_range_split_points(F
                                                                                uint8_t const* end_key_name,
                                                                                int end_key_name_length,
                                                                                int64_t chunk_size);
+
+DLLEXPORT WARN_UNUSED_RESULT FDBFuture* fdb_transaction_get_range_split_points_with_limit(FDBTransaction* tr,
+                                                                                          uint8_t const* begin_key_name,
+                                                                                          int begin_key_name_length,
+                                                                                          uint8_t const* end_key_name,
+                                                                                          int end_key_name_length,
+                                                                                          int64_t chunk_size,
+                                                                                          int limit);
 
 #define FDB_KEYSEL_LAST_LESS_THAN(k, l) k, l, 0, 0
 #define FDB_KEYSEL_LAST_LESS_OR_EQUAL(k, l) k, l, 1, 0

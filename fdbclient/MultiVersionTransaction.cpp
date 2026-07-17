@@ -18,15 +18,11 @@
  * limitations under the License.
  */
 
-#ifdef __unixish__
-#include <fcntl.h>
-#endif
-
 #include "fdbclient/IClientApi.h"
 #include "fdbclient/json_spirit/json_spirit_reader_template.h"
 #include "fdbclient/json_spirit/json_spirit_writer_template.h"
 #include "fdbclient/json_spirit/json_spirit_value.h"
-#include "flow/ThreadHelper.actor.h"
+#include "flow/ThreadHelper.h"
 #include "flow/Trace.h"
 #ifdef ADDRESS_SANITIZER
 #include <sanitizer/lsan_interface.h>
@@ -250,12 +246,21 @@ ThreadFuture<int64_t> DLTransaction::getEstimatedRangeSizeBytes(const KeyRangeRe
 }
 
 ThreadFuture<Standalone<VectorRef<KeyRef>>> DLTransaction::getRangeSplitPoints(const KeyRangeRef& range,
-                                                                               int64_t chunkSize) {
+                                                                               int64_t chunkSize,
+                                                                               int limit) {
 	if (!api->transactionGetRangeSplitPoints) {
 		return unsupported_operation();
 	}
-	FdbCApi::FDBFuture* f = api->transactionGetRangeSplitPoints(
-	    tr, range.begin.begin(), range.begin.size(), range.end.begin(), range.end.size(), chunkSize);
+	FdbCApi::FDBFuture* f;
+	if (limit < 0) {
+		f = api->transactionGetRangeSplitPoints(
+		    tr, range.begin.begin(), range.begin.size(), range.end.begin(), range.end.size(), chunkSize);
+	} else if (api->transactionGetRangeSplitPointsWithLimit) {
+		f = api->transactionGetRangeSplitPointsWithLimit(
+		    tr, range.begin.begin(), range.begin.size(), range.end.begin(), range.end.size(), chunkSize, limit);
+	} else {
+		return unsupported_operation();
+	}
 
 	return toThreadFuture<Standalone<VectorRef<KeyRef>>>(api, f, [](FdbCApi::FDBFuture* f, FdbCApi* api) {
 		const FdbCApi::FDBKey* splitKeys;
@@ -660,6 +665,11 @@ void DLApi::init() {
 	                   fdbCPath,
 	                   "fdb_transaction_get_range_split_points",
 	                   headerVersion >= 700);
+	loadClientFunction(&api->transactionGetRangeSplitPointsWithLimit,
+	                   lib,
+	                   fdbCPath,
+	                   "fdb_transaction_get_range_split_points_with_limit",
+	                   false);
 
 	loadClientFunction(&api->futureGetDouble,
 	                   lib,
@@ -1019,8 +1029,10 @@ ThreadFuture<int64_t> MultiVersionTransaction::getEstimatedRangeSizeBytes(const 
 }
 
 ThreadFuture<Standalone<VectorRef<KeyRef>>> MultiVersionTransaction::getRangeSplitPoints(const KeyRangeRef& range,
-                                                                                         int64_t chunkSize) {
-	return executeOperation(&ITransaction::getRangeSplitPoints, range, std::forward<int64_t>(chunkSize));
+                                                                                         int64_t chunkSize,
+                                                                                         int limit) {
+	return executeOperation(
+	    &ITransaction::getRangeSplitPoints, range, std::forward<int64_t>(chunkSize), std::forward<int>(limit));
 }
 
 void MultiVersionTransaction::atomicOp(const KeyRef& key, const ValueRef& value, uint32_t operationType) {
@@ -1903,6 +1915,18 @@ const char* MultiVersionApi::getClientVersion() {
 	return localClient->api->getClientVersion();
 }
 
+void MultiVersionApi::ignoreEnvironmentVariableNetworkOption(FDBNetworkOptions::Option option) {
+	if (FDBNetworkOptions::optionInfo.find(option) == FDBNetworkOptions::optionInfo.end()) {
+		throw invalid_option();
+	}
+
+	MutexHolder holder(lock);
+	if (envOptionsLoaded) {
+		throw invalid_option();
+	}
+	ignoredEnvOptions.insert(option);
+}
+
 void MultiVersionApi::useFutureProtocolVersion() {
 	localClient->api->useFutureProtocolVersion();
 }
@@ -2020,7 +2044,7 @@ std::vector<std::pair<std::string, bool>> MultiVersionApi::copyExternalLibraryPe
 			TraceEvent("CopyingExternalClient")
 			    .detail("FileName", filename)
 			    .detail("LibraryPath", path)
-			    .detail("TempPath", tempName);
+			    .detail("TempPath", std::string(tempName));
 
 			constexpr size_t buf_sz = 4096;
 			char buf[buf_sz];
@@ -2604,6 +2628,13 @@ void MultiVersionApi::loadEnvironmentVariableNetworkOptions() {
 
 	for (const auto& option : FDBNetworkOptions::optionInfo) {
 		if (!option.second.hidden) {
+			{
+				MutexHolder holder(lock);
+				if (ignoredEnvOptions.contains(option.first)) {
+					continue;
+				}
+			}
+
 			std::string valueStr;
 			try {
 				if (platform::getEnvironmentVar(("FDB_NETWORK_OPTION_" + option.second.name).c_str(), valueStr)) {
