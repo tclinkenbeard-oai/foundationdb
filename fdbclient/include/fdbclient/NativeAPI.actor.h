@@ -19,11 +19,6 @@
  */
 
 #pragma once
-#if defined(NO_INTELLISENSE) && !defined(FDBCLIENT_NATIVEAPI_ACTOR_G_H)
-#define FDBCLIENT_NATIVEAPI_ACTOR_G_H
-#include "fdbclient/NativeAPI.actor.g.h"
-#elif !defined(FDBCLIENT_NATIVEAPI_ACTOR_H)
-#define FDBCLIENT_NATIVEAPI_ACTOR_H
 
 #include "flow/BooleanParam.h"
 #include "flow/flow.h"
@@ -41,7 +36,6 @@
 #include "fdbclient/ClientLogEvents.h"
 #include "fdbclient/KeyRangeMap.h"
 #include "fdbclient/Tracing.h"
-#include "flow/actorcompiler.h" // has to be last include
 
 /*
 // CLIENT_BUGGIFY should be used to randomly introduce failures at run time (like buggify() but for client side testing)
@@ -543,7 +537,7 @@ Future<Void> Database::run(Fun fun) {
 	}
 }
 
-ACTOR Future<Version> waitForCommittedVersion(Database cx, Version version, SpanContext spanContext);
+Future<Version> waitForCommittedVersion(Database cx, Version version, SpanContext spanContext);
 Future<Standalone<VectorRef<DDMetricsRef>>> waitDataDistributionMetricsList(Database cx, KeyRange keys, int shardLimit);
 
 int64_t extractIntOption(Optional<StringRef> value,
@@ -638,7 +632,7 @@ Future<Optional<StorageMetrics>> waitStorageMetricsWithLocation(Version version,
 // Return the suggested split points from storage server.The locations tell which interface should
 // serve the request. `limit` is the current estimated storage metrics of `keys`.The returned points, if present,
 // guarantee the metrics of split result is within limit.
-ACTOR Future<Optional<Standalone<VectorRef<KeyRef>>>> splitStorageMetricsWithLocations(
+Future<Optional<Standalone<VectorRef<KeyRef>>>> splitStorageMetricsWithLocations(
     std::vector<KeyRangeLocationInfo> locations,
     KeyRange keys,
     StorageMetrics limit,
@@ -659,6 +653,3 @@ Future<KeyRangeLocationInfo> getKeyLocation_internal(Database cx,
                                                      Version version);
 
 Future<Void> refreshTransaction(DatabaseContext* self, Transaction* tr);
-
-#include "flow/unactorcompiler.h"
-#endif
