@@ -54,7 +54,7 @@ struct AutomaticIdempotencyWorkload : TestWorkload {
 	double automaticPercentage;
 	constexpr static double slop = 2.0;
 	double pollingInterval;
-	bool disableAutomaticIdempotency = false;
+	double disableAutomaticIdempotencyProbability;
 
 	bool ok = true;
 
@@ -80,9 +80,10 @@ struct AutomaticIdempotencyWorkload : TestWorkload {
 		minMinAgeSeconds = getOption(options, "minMinAgeSeconds"_sr, 15);
 		automaticPercentage = getOption(options, "automaticPercentage"_sr, 0.1);
 		pollingInterval = getOption(options, "pollingInterval"_sr, 5.0);
+		disableAutomaticIdempotencyProbability = getOption(options, "disableAutomaticIdempotencyProbability"_sr, 0.9);
 
-		// Disable use of automatic idempotency most of the time so we do more extensive cleanup validation
-		if (clientId == 0 && deterministicRandom()->random01() < 0.9) {
+		// Randomly disable automatic idempotency for cleanup-focused runs unless the test requests mixed coverage.
+		if (clientId == 0 && deterministicRandom()->random01() < disableAutomaticIdempotencyProbability) {
 			sharedConfig.disableAutomaticIdempotency = true;
 		}
 	}
@@ -124,12 +125,12 @@ struct AutomaticIdempotencyWorkload : TestWorkload {
 			    [this, idempotencyId = idempotencyId, automatic, &committedTr](
 			        Reference<ReadYourWritesTransaction> tr) {
 				    committedTr = tr;
-				    // If we don't set AUTOMATIC_IDEMPOTENCY the idempotency id won't automatically get cleaned up, so
-				    // it should create work for the cleaner.
-				    tr->setOption(FDBTransactionOptions::IDEMPOTENCY_ID, idempotencyId);
 				    if (automatic) {
-					    // We also want to exercise the automatic idempotency code path.
+					    // Exercise the code path that generates an idempotency ID when the caller does not provide one.
 					    tr->setOption(FDBTransactionOptions::AUTOMATIC_IDEMPOTENCY);
+				    } else {
+					    // Explicit IDs are not automatically cleaned up, so they create work for the cleaner.
+					    tr->setOption(FDBTransactionOptions::IDEMPOTENCY_ID, idempotencyId);
 				    }
 				    uint32_t index = keyPrefix.size();
 				    Value suffix = makeString(14);
@@ -195,12 +196,10 @@ struct AutomaticIdempotencyWorkload : TestWorkload {
 		RangeResult result = co_await tr->getRange(prefixRange(keyPrefix), CLIENT_KNOBS->TOO_MANY);
 		ASSERT(!result.more);
 		std::unordered_set<Value> ids;
-		// Make sure they're all unique - ie no transaction committed twice
-		for (const auto& [k, v] : result) {
-			ids.emplace(v);
-		}
 		for (const auto& [k, rawValue] : result) {
 			auto v = ObjectReader::fromStringRef<ValueType>(rawValue, Unversioned());
+			// The generated native ID is not observable, so use the stable logical token to detect duplicate commits.
+			ids.emplace(v.idempotencyId);
 			BinaryReader reader(k, Unversioned());
 			reader.readBytes(keyPrefix.size());
 			Version commitVersion;
@@ -215,9 +214,10 @@ struct AutomaticIdempotencyWorkload : TestWorkload {
 			    .detail("Id", v.idempotencyId)
 			    .detail("CreatedTime", v.createdTime);
 		}
-		if (ids.size() != clientCount * numTransactions) {
+		if (result.size() != clientCount * numTransactions || ids.size() != clientCount * numTransactions) {
 			ok = false;
 		}
+		ASSERT_EQ(result.size(), clientCount * numTransactions);
 		ASSERT_EQ(ids.size(), clientCount * numTransactions);
 	}
 

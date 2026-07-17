@@ -5,6 +5,7 @@ testTitle = 'AutomaticIdempotency'
     testName = 'AutomaticIdempotencyCorrectness'
     minMinAgeSeconds = 15
     pollingInterval = 5.0
+    disableAutomaticIdempotencyProbability = 0.0
 
     [[test.workload]]
     testName='Attrition'
