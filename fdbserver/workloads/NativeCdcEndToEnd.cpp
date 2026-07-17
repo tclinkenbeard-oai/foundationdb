@@ -30,8 +30,11 @@
 #include "fdbclient/DatabaseContext.h"
 #include "fdbclient/NativeCdc.h"
 #include "fdbclient/SystemData.h"
+#include "fdbserver/core/Knobs.h"
 #include "fdbserver/core/RecoveryState.h"
 #include "fdbserver/core/ServerDBInfo.h"
+#include "fdbserver/logsystem/LogSystemConsumer.h"
+#include "fdbserver/logsystem/LogSystemFactory.h"
 #include "fdbserver/tester/workloads.h"
 #include "fdbrpc/simulator.h"
 #include "flow/DeterministicRandom.h"
@@ -72,6 +75,9 @@ class NativeCdcEndToEndWorkload : public TestWorkload {
 	bool testMemoryBound;
 	bool testReplyChunking;
 	bool testOversizedPeek;
+	bool testRawReplyFanout;
+	bool testCompleteVersionLimit;
+	bool testPoppedTooOld;
 	bool testDurableAckScan;
 	bool testDelayedRetention;
 	bool testRetiredRecovery;
@@ -891,6 +897,107 @@ class NativeCdcEndToEndWorkload : public TestWorkload {
 		co_await timeoutError(waitForRetiredTagCleanup(cx), operationTimeout);
 	}
 
+	Future<Tag> getCurrentStreamTag(Database cx, CDCStreamId streamId) {
+		Transaction tr(cx);
+		while (true) {
+			Error err;
+			try {
+				tr.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
+				RangeResult history =
+				    co_await tr.getRange(cdcTagHistoryRangeFor(streamId), 1, Snapshot::False, Reverse::True);
+				ASSERT_EQ(history.size(), 1);
+				co_return decodeCDCTagHistoryKey(history.front().key).tag;
+			} catch (Error& e) {
+				err = e;
+			}
+			co_await tr.onError(err);
+		}
+	}
+
+	Future<int64_t> getRetainedReplyCount(Database cx, CDCStreamId streamId, Version begin) {
+		const Tag tag = co_await getCurrentStreamTag(cx, streamId);
+		Reference<LogSystemConsumer> logSystem = makeLogSystemConsumerFromServerDBInfo(UID(0, streamId), dbInfo->get());
+		ASSERT(logSystem);
+		Reference<IReplayPeekCursor> cursor = logSystem->peekSingle(UID(0, streamId), begin, tag, {});
+		cursor->setReplyByteLimit(SERVER_KNOBS->MAXIMUM_PEEK_BYTES);
+		co_return cursor->getMaxRetainedReplyCount();
+	}
+
+	Future<Void> expectConsumeError(Reference<NativeCdcConsumer> consumer, Version throughVersion, int expectedError) {
+		Optional<Error> error;
+		const double deadline = now() + operationTimeout;
+		while (consumer->position().lastConsumedVersion < throughVersion && !error.present()) {
+			try {
+				co_await timeoutError(consumer->consume(), operationTimeout);
+			} catch (Error& e) {
+				error = e;
+			}
+			ASSERT_LT(now(), deadline);
+		}
+		ASSERT(error.present());
+		ASSERT_EQ(error.get().code(), expectedError);
+	}
+
+	Future<Void> validateRawReplyFanout(Database cx) {
+		ASSERT_EQ(streams.size(), 1);
+		const Key key = keyForIndex(keyCount / 2);
+		const Version committed = co_await writeValue(cx, key, "raw-reply-fanout"_sr);
+		const CDCStreamId streamId = streams.front().consumer->position().streamId;
+		const int64_t retainedReplyCount = co_await getRetainedReplyCount(cx, streamId, committed);
+		const int64_t maximumPeekBytes = SERVER_KNOBS->MAXIMUM_PEEK_BYTES;
+		const int64_t bufferBytes = SERVER_KNOBS->CDC_PROXY_BUFFER_BYTES;
+		ASSERT_GT(bufferBytes, maximumPeekBytes);
+		ASSERT_GT(retainedReplyCount, (bufferBytes - 1) / maximumPeekBytes);
+
+		co_await expectConsumeError(streams.front().consumer, committed, error_code_server_overloaded);
+		CODE_PROBE(true, "Native CDC rejects TLog reply fanout that cannot fit the proxy buffer");
+		co_await timeoutError(removeNativeCdcStreamClient(cx, streams.front().name), operationTimeout);
+		streams.clear();
+		co_await timeoutError(waitForRetiredTagCleanup(cx), operationTimeout);
+	}
+
+	Future<Void> validateCompleteVersionLimit(Database cx) {
+		ASSERT_EQ(streams.size(), 1);
+		const Key key = keyForIndex(keyCount / 2);
+		const Value value(std::string(memoryTestValueBytes, 'x'));
+		const Version committed = co_await writeValue(cx, key, value);
+		const CDCStreamId streamId = streams.front().consumer->position().streamId;
+		const int64_t retainedReplyCount = co_await getRetainedReplyCount(cx, streamId, committed);
+		const int64_t maximumPeekBytes = SERVER_KNOBS->MAXIMUM_PEEK_BYTES;
+		const int64_t bufferBytes = SERVER_KNOBS->CDC_PROXY_BUFFER_BYTES;
+		ASSERT_GT(bufferBytes, maximumPeekBytes);
+		ASSERT_LE(retainedReplyCount, (bufferBytes - 1) / maximumPeekBytes);
+		const int64_t hardBufferedBytes = bufferBytes - retainedReplyCount * maximumPeekBytes;
+		ASSERT_GT(hardBufferedBytes, 0);
+		ASSERT_LT(hardBufferedBytes, memoryTestValueBytes);
+		ASSERT_LT(memoryTestValueBytes + 512, maximumPeekBytes);
+
+		co_await expectConsumeError(streams.front().consumer, committed, error_code_server_overloaded);
+		CODE_PROBE(true, "Native CDC rejects a filtered version that cannot fit the complete buffer budget");
+		co_await timeoutError(removeNativeCdcStreamClient(cx, streams.front().name), operationTimeout);
+		streams.clear();
+		co_await timeoutError(waitForRetiredTagCleanup(cx), operationTimeout);
+	}
+
+	Future<Void> validatePoppedTooOld(Database cx) {
+		ASSERT_EQ(streams.size(), 1);
+		const Key key = keyForIndex(keyCount / 2);
+		const Version committed = co_await writeValue(cx, key, "popped-before-consume"_sr);
+		const CDCStreamId streamId = streams.front().consumer->position().streamId;
+		const Tag tag = co_await getCurrentStreamTag(cx, streamId);
+		Reference<LogSystemConsumer> logSystem = makeLogSystemConsumerFromServerDBInfo(UID(0, streamId), dbInfo->get());
+		ASSERT(logSystem);
+		const Version popped = committed + 1;
+		logSystem->pop(popped, tag);
+		co_await timeoutError(logSystem->waitForPopped(popped, tag), operationTimeout);
+
+		co_await expectConsumeError(streams.front().consumer, committed, error_code_transaction_too_old);
+		CODE_PROBE(true, "Native CDC rejects a consume after its unread TLog mutation was popped");
+		co_await timeoutError(removeNativeCdcStreamClient(cx, streams.front().name), operationTimeout);
+		streams.clear();
+		co_await timeoutError(waitForRetiredTagCleanup(cx), operationTimeout);
+	}
+
 	Future<Void> validateDurableAcknowledgementScan(Database cx) {
 		ASSERT_EQ(streams.size(), 1);
 		const Key key = keyForIndex(keyCount / 2);
@@ -1298,6 +1405,18 @@ class NativeCdcEndToEndWorkload : public TestWorkload {
 			co_await validateOversizedPeek(cx);
 			co_return;
 		}
+		if (testRawReplyFanout) {
+			co_await validateRawReplyFanout(cx);
+			co_return;
+		}
+		if (testCompleteVersionLimit) {
+			co_await validateCompleteVersionLimit(cx);
+			co_return;
+		}
+		if (testPoppedTooOld) {
+			co_await validatePoppedTooOld(cx);
+			co_return;
+		}
 		if (testReplyChunking) {
 			co_await validateReplyChunking(cx);
 			co_return;
@@ -1383,6 +1502,9 @@ public:
 		testMemoryBound = getOption(options, "testMemoryBound"_sr, false);
 		testReplyChunking = getOption(options, "testReplyChunking"_sr, false);
 		testOversizedPeek = getOption(options, "testOversizedPeek"_sr, false);
+		testRawReplyFanout = getOption(options, "testRawReplyFanout"_sr, false);
+		testCompleteVersionLimit = getOption(options, "testCompleteVersionLimit"_sr, false);
+		testPoppedTooOld = getOption(options, "testPoppedTooOld"_sr, false);
 		testDurableAckScan = getOption(options, "testDurableAckScan"_sr, false);
 		testDelayedRetention = getOption(options, "testDelayedRetention"_sr, false);
 		testRetiredRecovery = getOption(options, "testRetiredRecovery"_sr, false);
@@ -1406,6 +1528,10 @@ public:
 		ASSERT(!(prepareRestartDrain && drainAfterRestart));
 		ASSERT(!(testReplyChunking && (testOversizedPeek || testDurableAckScan)));
 		ASSERT(!(testOversizedPeek && testDurableAckScan));
+		ASSERT_LE(static_cast<int>(testRawReplyFanout) + static_cast<int>(testCompleteVersionLimit) +
+		              static_cast<int>(testPoppedTooOld) + static_cast<int>(testReplyChunking) +
+		              static_cast<int>(testOversizedPeek) + static_cast<int>(testDurableAckScan),
+		          1);
 		ASSERT(!(testRetiredSharedTagSnapshot && testRetiredRecovery));
 	}
 

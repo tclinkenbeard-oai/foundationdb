@@ -1,0 +1,33 @@
+[configuration]
+config = 'single'
+singleRegion = true
+desiredTLogCount = 3
+buggify = false
+faultInjection = false
+
+[[knobs]]
+enable_native_cdc = true
+native_cdc_tag_count = 1
+# Three retained 4 KiB raw replies fit, leaving only 1 KiB for a complete filtered version.
+maximum_peek_bytes = 4096
+cdc_proxy_buffer_bytes = 13312
+cdc_proxy_consume_poll_timeout = 30.0
+
+[[test]]
+testTitle = 'NativeCdcCompleteVersionLimit'
+useDB = true
+waitForQuiescenceEnd = false
+connectionFailuresDisableDuration = 1000000
+
+    [[test.workload]]
+    testName = 'NativeCdcEndToEnd'
+    initialStreamCount = 1
+    minStreamCount = 1
+    maxStreamCount = 1
+    keyCount = 4
+    writesPerRound = 1
+    rounds = 0
+    testCompleteVersionLimit = true
+    # The tagged reply stays below 4 KiB, while its complete filtered version exceeds the remaining 1 KiB.
+    memoryTestValueBytes = 2048
+    operationTimeout = 120.0
