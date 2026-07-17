@@ -92,29 +92,6 @@ create_sccache_env_file() {
   echo "${env_file}"
 }
 
-create_joshua_package_url() {
-  local package_url="${1}"
-  local expiry
-  local sas_token
-
-  # The Buildkite agent can upload to this private container, but Joshua fetches
-  # the package independently. Give it a short-lived read-only URL and keep the
-  # credential out of the Buildkite log.
-  expiry="$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')"
-  sas_token="$(
-    az storage container generate-sas \
-      --auth-mode login \
-      --account-name "${default_storage_account}" \
-      --name "${default_blob_container}" \
-      --permissions r \
-      --expiry "${expiry}" \
-      --https-only \
-      --as-user \
-      -o tsv
-  )"
-  printf '%s?%s\n' "${package_url}" "${sas_token}"
-}
-
 upload_release_artifacts() {
   local release_version="${FDB_RELEASE_BLOB_VERSION:-}"
   local release_arch
@@ -377,7 +354,6 @@ if (( ${#tarballs[@]} )) && [[ -f "${tarballs[0]}" ]]; then
     echo "Failed to upload correctness packages" >&2
     exit 1
   fi
-  joshua_tarball_url="$(create_joshua_package_url "${selected_tarball_url}")"
   echo "--- Submitting Joshua job"
   joshua_proxy_addr="${JOSHUA_PROXY_ADDR:-${default_joshua_proxy_addr}}"
   joshua_runs="${JOSHUA_RUNS:-${default_joshua_runs}}"
@@ -433,7 +409,7 @@ if (( ${#tarballs[@]} )) && [[ -f "${tarballs[0]}" ]]; then
     python3 building/joshua_proxy/joshua_proxy_client.py
     submit
     --addr "${joshua_proxy_addr}"
-    --correctness-package-url "${joshua_tarball_url}"
+    --correctness-package-url "${selected_tarball_url}"
     --runs "${joshua_runs}"
   )
   if [[ -n "${joshua_commit_hash}" ]]; then
