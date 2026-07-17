@@ -1,5 +1,10 @@
 [configuration]
-generateFearless = true
+# DcLag requires a primary satellite TLog; prevent randomized region generation
+# from selecting a topology with no satellites and silently skipping the test.
+config = '''double remote_double usable_regions=2 regions=[{"datacenters":[{"id":"0","priority":2},{"id":"2","priority":1,"satellite":1}],"satellite_redundancy_mode":"one_satellite_single"},{"datacenters":[{"id":"1","priority":1},{"id":"3","priority":1,"satellite":1}],"satellite_redundancy_mode":"one_satellite_single"}]'''
+generateFearless = false
+singleRegion = true
+datacenters = 4
 processesPerMachine = 1
 machineCount = 20
 minimumRegions = 2
