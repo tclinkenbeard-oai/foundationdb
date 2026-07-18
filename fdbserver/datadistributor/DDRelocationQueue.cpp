@@ -1393,6 +1393,19 @@ Future<Void> cancelDataMove(class DDQueue* self, KeyRange range, const DDEnabled
 	}
 }
 
+void requeueCancelledRestoredRelocation(DDQueue* self, RelocateData const& rd, bool doBulkLoading) {
+	if (doBulkLoading || !rd.isRestore()) {
+		return;
+	}
+
+	RelocateShard retry(rd.keys, rd.dmReason, rd.reason, deterministicRandom()->randomUniqueID());
+	retry.priority = rd.priority;
+	if (Optional<KeyRange> parentRange = rd.getParentRange(); parentRange.present()) {
+		retry.setParentRange(parentRange.get());
+	}
+	self->output.send(retry);
+}
+
 static std::string destServersString(std::vector<std::pair<Reference<IDataDistributionTeam>, bool>> const& bestTeams) {
 	std::stringstream ss;
 
@@ -2437,6 +2450,7 @@ Future<Void> dataDistributionRelocator(DDQueue* self,
 
 	if (err.code() == error_code_data_move_dest_team_not_found) {
 		co_await cancelDataMove(self, rd.keys, ddEnabledState);
+		requeueCancelledRestoredRelocation(self, rd, doBulkLoading);
 		TraceEvent(SevWarnAlways, "RelocateShardCancelDataMoveTeamNotFound")
 		    .detail("Src", describe(rd.src))
 		    .detail("DataMoveMetaData", rd.dataMove != nullptr ? rd.dataMove->meta.toString() : "Empty");
@@ -3261,5 +3275,35 @@ TEST_CASE("/DataDistribution/DDQueue/SerializeRelocatorError") {
 	ASSERT(immediate.isReady());
 	ASSERT(immediate.isError());
 	ASSERT(immediate.getError().code() == error_code_movekeys_conflict);
+	co_return;
+}
+
+TEST_CASE("/DataDistribution/DDQueue/RequeueCancelledRestoredRelocation") {
+	DDQueue self;
+	FutureStream<RelocateShard> retries = self.output.getFuture();
+	KeyRange keys(KeyRangeRef("begin"_sr, "end"_sr));
+	RelocateShard restored(keys, DataMovementReason::RECOVER_MOVE, RelocateReason::OTHER, UID(1, 2));
+	RelocateData rd(restored);
+	rd.priority = SERVER_KNOBS->PRIORITY_TEAM_UNHEALTHY;
+	rd.dataMove = std::make_shared<DataMove>();
+
+	requeueCancelledRestoredRelocation(&self, rd, false);
+	ASSERT(retries.isReady());
+	RelocateShard retry = retries.pop();
+	ASSERT(retry.keys == keys);
+	ASSERT(retry.priority == rd.priority);
+	ASSERT(retry.moveReason == DataMovementReason::RECOVER_MOVE);
+	ASSERT(retry.reason == rd.reason);
+	ASSERT(retry.traceId.isValid());
+	ASSERT(retry.traceId != rd.randomId);
+	ASSERT(retry.dataMoveId == anonymousShardId);
+	ASSERT(!retry.isRestore());
+	ASSERT(!retry.cancelled);
+
+	requeueCancelledRestoredRelocation(&self, rd, true);
+	ASSERT(!retries.isReady());
+	rd.dataMove.reset();
+	requeueCancelledRestoredRelocation(&self, rd, false);
+	ASSERT(!retries.isReady());
 	co_return;
 }
