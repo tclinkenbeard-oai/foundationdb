@@ -519,18 +519,20 @@ Reference<IReplayPeekCursor> LogSystemConsumer::peekLocal(UID dbgid,
 					// detail("LogId",
 					// ls.oldLogData[i].tLogs[bestOldSet]->logServers[ls.tLogs[bestOldSet]->bestLocationFor( tag
 					// )]->get().id());
-					cursors.push_back(
-					    makeReference<MergedPeekCursor>(ls.oldLogData[i].tLogs[bestOldSet]->logServers,
-					                                    ls.oldLogData[i].tLogs[bestOldSet]->bestLocationFor(tag),
-					                                    ls.oldLogData[i].tLogs[bestOldSet]->logServers.size() + 1 -
-					                                        ls.oldLogData[i].tLogs[bestOldSet]->tLogReplicationFactor,
-					                                    tag,
-					                                    thisBegin,
-					                                    std::min(lastBegin, end),
-					                                    useMergePeekCursors,
-					                                    ls.oldLogData[i].tLogs[bestOldSet]->tLogLocalities,
-					                                    ls.oldLogData[i].tLogs[bestOldSet]->tLogPolicy,
-					                                    ls.oldLogData[i].tLogs[bestOldSet]->tLogReplicationFactor));
+					cursors.push_back(makeReference<MergedPeekCursor>(
+					    ls.oldLogData[i].tLogs[bestOldSet]->logServers,
+					    // An old TLog can be permanently lost while its reused address still
+					    // appears active. Do not pin this finite recovery peek to that replica.
+					    -1,
+					    ls.oldLogData[i].tLogs[bestOldSet]->logServers.size() + 1 -
+					        ls.oldLogData[i].tLogs[bestOldSet]->tLogReplicationFactor,
+					    tag,
+					    thisBegin,
+					    std::min(lastBegin, end),
+					    useMergePeekCursors,
+					    ls.oldLogData[i].tLogs[bestOldSet]->tLogLocalities,
+					    ls.oldLogData[i].tLogs[bestOldSet]->tLogPolicy,
+					    ls.oldLogData[i].tLogs[bestOldSet]->tLogReplicationFactor));
 					epochEnds.emplace_back(std::min(lastBegin, end));
 				}
 				lastBegin = thisBegin;

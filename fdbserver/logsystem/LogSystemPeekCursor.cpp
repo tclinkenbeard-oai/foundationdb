@@ -1054,11 +1054,37 @@ Optional<UID> MergedPeekCursor::getCurrentPeekLocation() const {
 }
 
 Version MergedPeekCursor::popped() const {
-	Version poppedVersion = 0;
-	for (auto& c : serverCursors) {
-		poppedVersion = std::max(poppedVersion, c->popped());
+	if (bestServer >= 0) {
+		Version poppedVersion = 0;
+		for (auto& c : serverCursors) {
+			poppedVersion = std::max(poppedVersion, c->popped());
+		}
+		return poppedVersion;
 	}
-	return poppedVersion;
+
+	std::vector<std::pair<Version, int>> poppedVersions;
+	poppedVersions.reserve(serverCursors.size());
+	for (int i = 0; i < serverCursors.size(); ++i) {
+		poppedVersions.emplace_back(serverCursors[i]->popped(), i);
+	}
+
+	if (logSet) {
+		ASSERT(logSet->tLogPolicy);
+		std::sort(poppedVersions.begin(), poppedVersions.end());
+
+		std::vector<LocalityEntry> availableLocations;
+		for (const auto& [poppedVersion, server] : poppedVersions) {
+			availableLocations.push_back(logSet->logEntryArray[server]);
+			if (availableLocations.size() >= tLogReplicationFactor && logSet->satisfiesPolicy(availableLocations)) {
+				return poppedVersion;
+			}
+		}
+		ASSERT(false);
+	}
+
+	ASSERT(readQuorum > 0 && readQuorum <= poppedVersions.size());
+	std::nth_element(poppedVersions.begin(), poppedVersions.end() - readQuorum, poppedVersions.end());
+	return poppedVersions[poppedVersions.size() - readQuorum].first;
 }
 
 SetPeekCursor::SetPeekCursor(std::vector<Reference<LogSet>> const& logSets,

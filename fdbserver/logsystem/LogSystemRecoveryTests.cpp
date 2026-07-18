@@ -54,9 +54,70 @@ std::tuple<int, std::vector<TLogLockResult>, bool> makeLogGroupResults(
 	return std::make_tuple(replicationFactor, std::move(lockResults), nonAvailableTLogsCompletePolicy);
 }
 
+Reference<ServerPeekCursor> makePoppedServerCursor(Version popped) {
+	TLogPeekReply reply;
+	reply.end = popped;
+	reply.popped = popped;
+	reply.maxKnownVersion = 0;
+	reply.minKnownCommittedVersion = 0;
+	return makeReference<ServerPeekCursor>(
+	    reply, LogMessageVersion(1), LogMessageVersion(2), TagsAndMessage(), false, popped, Tag(0, 0));
+}
+
+Reference<MergedPeekCursor> makeMergedPoppedCursor(const std::vector<Version>& popped, int bestServer, int readQuorum) {
+	std::vector<Reference<ServerPeekCursor>> cursors;
+	for (Version version : popped) {
+		cursors.push_back(makePoppedServerCursor(version));
+	}
+	return makeReference<MergedPeekCursor>(
+	    cursors, LogMessageVersion(1), bestServer, readQuorum, Optional<LogMessageVersion>(), Reference<LogSet>(), 0);
+}
+
 } // namespace
 
 void forceLinkLogSystemRecoveryTests() {}
+
+TEST_CASE("/LogSystem/MergedPeekCursor/PoppedRequiresReadQuorumWithoutPreferred") {
+	ASSERT(makeMergedPoppedCursor({ 0, 0, 2 }, 0, 2)->popped() == 2);
+	ASSERT(makeMergedPoppedCursor({ 0, 0, 2 }, -1, 2)->popped() == 0);
+	ASSERT(makeMergedPoppedCursor({ 0, 2, 2 }, -1, 2)->popped() == 2);
+	return Void();
+}
+
+TEST_CASE("/LogSystem/PeekLocal/OldGenerationDoesNotPinPreferredTLog") {
+	constexpr int8_t tLogLocality = 1;
+	constexpr Version oldStart = 100;
+	constexpr Version currentStart = 101;
+	LocalityData locality;
+	TLogInterface currentA(locality);
+	TLogInterface currentB(locality);
+	TLogInterface currentC(locality);
+	TLogInterface oldA(locality);
+	TLogInterface oldB(locality);
+	TLogInterface oldC(locality);
+
+	auto currentSet = makeSingleLogSet({ currentA, currentB, currentC });
+	currentSet->locality = tLogLocality;
+	currentSet->startVersion = currentStart;
+	currentSet->tLogReplicationFactor = 2;
+	auto oldSet = makeSingleLogSet({ oldA, oldB, oldC });
+	oldSet->locality = tLogLocality;
+	oldSet->startVersion = oldStart;
+	oldSet->tLogReplicationFactor = 2;
+
+	auto logSystem = makeReference<LogSystem>(UID(), locality, LogEpoch(1));
+	logSystem->tLogs.push_back(currentSet);
+	OldLogData old;
+	old.epochEnd = currentStart;
+	old.tLogs.push_back(oldSet);
+	logSystem->oldLogData.push_back(old);
+
+	LogSystemConsumer consumer(logSystem);
+	// CDC disables ReplayMultiCursor prefetch so this construction test needs no live TLog endpoints.
+	auto cursor = consumer.peekLocal(UID(), Tag(tagLocalityCDC, 2), oldStart, currentStart + 1, false, tLogLocality);
+	ASSERT(!cursor->getPrimaryPeekLocation().present());
+	return Void();
+}
 
 TEST_CASE("/LogSystem/PopLogRouter/CurrentGenerationAcceptsPredecessor") {
 	constexpr Version generationStart = 100;
