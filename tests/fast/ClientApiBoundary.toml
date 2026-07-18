@@ -1,0 +1,12 @@
+testClass = 'ClientApiBoundaryCoverage'
+
+[configuration]
+buggify = false
+faultInjection = false
+
+[[test]]
+testTitle = 'ClientApiBoundaryCoverage'
+runFailureWorkloads = false
+
+    [[test.workload]]
+    testName = 'ClientApiBoundary'
