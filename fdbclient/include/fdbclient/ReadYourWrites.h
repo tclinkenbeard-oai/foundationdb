@@ -47,7 +47,7 @@ struct ReadYourWritesTransactionOptions {
 	int snapshotRywEnabled;
 	bool bypassUnreadable : 1;
 
-	ReadYourWritesTransactionOptions() {}
+	ReadYourWritesTransactionOptions() = default;
 	explicit ReadYourWritesTransactionOptions(Transaction const& tr);
 	void reset(Transaction const& tr);
 	bool getAndResetWriteConflictDisabled();
@@ -115,7 +115,7 @@ public:
 	                                         Reverse = Reverse::False);
 
 	[[nodiscard]] Future<Standalone<VectorRef<const char*>>> getAddressesForKey(const Key& key);
-	Future<Standalone<VectorRef<KeyRef>>> getRangeSplitPoints(const KeyRange& range, int64_t chunkSize);
+	Future<Standalone<VectorRef<KeyRef>>> getRangeSplitPoints(const KeyRange& range, int64_t chunkSize, int limit = -1);
 	Future<int64_t> getEstimatedRangeSizeBytes(const KeyRange& keys);
 
 	void addReadConflictRange(KeyRangeRef const& keys);

@@ -168,12 +168,12 @@ public:
 	// v.map(&T::member) is equivalent to v.map<R>([](T t) { return t.member; })
 	template <class R, class Rp = std::decay_t<R>>
 	    requires(std::is_class_v<T>)
-	ErrorOr<Rp> map(R std::conditional_t<std::is_class_v<T>, T, Void>::*member) const& {
+	ErrorOr<Rp> map(R std::conditional_t<std::is_class_v<T>, T, Void>::* member) const& {
 		return present() ? ErrorOr<Rp>(get().*member) : ErrorOr<Rp>(getError());
 	}
 	template <class R, class Rp = std::decay_t<R>>
 	    requires(std::is_class_v<T>)
-	ErrorOr<Rp> map(R std::conditional_t<std::is_class_v<T>, T, Void>::*member) && {
+	ErrorOr<Rp> map(R std::conditional_t<std::is_class_v<T>, T, Void>::* member) && {
 		return present() ? ErrorOr<Rp>(std::move(*this).get().*member) : ErrorOr<Rp>(getError());
 	}
 
@@ -202,7 +202,7 @@ public:
 	// v.mapRef(&P::member) is equivalent to ErrorOr<R>(v.get()->member) if v is present and non-null
 	template <class P, class R, class Rp = std::decay_t<R>>
 	    requires(std::is_class_v<T> || std::is_pointer_v<T>)
-	ErrorOr<Rp> mapRef(R P::*member) const& {
+	ErrorOr<Rp> mapRef(R P::* member) const& {
 
 		if (!present()) {
 			return ErrorOr<Rp>(getError());
@@ -551,7 +551,7 @@ struct LineageProperties : LineagePropertiesBase {
 	// A user should implement this for any type
 	// within the properties class.
 	template <class Value>
-	bool isSet(Value Derived::*member) const {
+	bool isSet(Value Derived::* member) const {
 		return true;
 	}
 };
@@ -602,7 +602,7 @@ public:
 		parent.clear();
 	}
 	template <class T, class V>
-	V& modify(V T::*member) {
+	V& modify(V T::* member) {
 		Lock _{ mutex };
 		auto& res = findOrInsert(T::name).properties;
 		if (!res) {
@@ -612,7 +612,7 @@ public:
 		return map->*member;
 	}
 	template <class T, class V>
-	std::optional<V> get(V T::*member) const {
+	std::optional<V> get(V T::* member) const {
 		Lock _{ mutex };
 		auto current = this;
 		while (current != nullptr) {
@@ -628,7 +628,7 @@ public:
 		return std::optional<V>{};
 	}
 	template <class T, class V>
-	std::vector<V> stack(V T::*member) const {
+	std::vector<V> stack(V T::* member) const {
 		Lock _{ mutex };
 		auto current = this;
 		std::vector<V> res;
@@ -858,8 +858,9 @@ public:
 			promises = 0;
 			if (!futures)
 				destroy();
-		} else
+		} else {
 			--promises;
+		}
 	}
 	void delFutureRef() {
 		if (!--futures) {
@@ -1239,8 +1240,9 @@ struct NotifiedQueue : private SingleCallback<T>
 		if (!--promises) {
 			if (futures) {
 				sendError(broken_promise());
-			} else
+			} else {
 				destroy();
+			}
 		}
 	}
 	void delFutureRef() {
@@ -1262,9 +1264,9 @@ struct NotifiedQueue : private SingleCallback<T>
 		ASSERT(SingleCallback<T>::next == this);
 		cb->insert(this);
 	}
-	virtual void unwait() override { delFutureRef(); }
-	virtual void fire(T const&) override { ASSERT(false); }
-	virtual void fire(T&&) override { ASSERT(false); }
+	void unwait() override { delFutureRef(); }
+	void fire(T const&) override { ASSERT(false); }
+	void fire(T&&) override { ASSERT(false); }
 
 protected:
 	T popImpl() {
@@ -1532,13 +1534,13 @@ struct Actor<void> {
 
 template <class ActorType, int CallbackNumber, class ValueType>
 struct ActorCallback : Callback<ValueType> {
-	virtual void fire(ValueType const& value) override {
+	void fire(ValueType const& value) override {
 #ifdef ENABLE_SAMPLING
 		LineageScope _(static_cast<ActorType*>(this)->lineageAddr());
 #endif
 		static_cast<ActorType*>(this)->a_callback_fire(this, value);
 	}
-	virtual void error(Error e) override {
+	void error(Error e) override {
 #ifdef ENABLE_SAMPLING
 		LineageScope _(static_cast<ActorType*>(this)->lineageAddr());
 #endif

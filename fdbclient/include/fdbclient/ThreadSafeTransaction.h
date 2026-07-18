@@ -25,7 +25,7 @@
 #pragma once
 
 #include "fdbclient/ReadYourWrites.h"
-#include "flow/ThreadHelper.actor.h"
+#include "flow/ThreadHelper.h"
 #include "fdbclient/ClusterInterface.h"
 #include "fdbclient/IClientApi.h"
 
@@ -123,7 +123,8 @@ public:
 	ThreadFuture<Standalone<StringRef>> getVersionstamp() override;
 	ThreadFuture<int64_t> getEstimatedRangeSizeBytes(const KeyRangeRef& keys) override;
 	ThreadFuture<Standalone<VectorRef<KeyRef>>> getRangeSplitPoints(const KeyRangeRef& range,
-	                                                                int64_t chunkSize) override;
+	                                                                int64_t chunkSize,
+	                                                                int limit = -1) override;
 
 	void addReadConflictRange(const KeyRangeRef& keys) override;
 	void makeSelfConflicting();

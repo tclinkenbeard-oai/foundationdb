@@ -134,18 +134,16 @@ public:
 	void send(U&& value) const {
 		sav->send(std::forward<U>(value));
 	}
-    // Swift can't call method that takes in a universal references (U&&),
-    // so provide a callable `send` method that copies the value.
-    void sendCopy(const T& valueCopy) const SWIFT_NAME(send(_:)) {
-        sav->send(valueCopy);
-    }
+	// Swift can't call method that takes in a universal references (U&&),
+	// so provide a callable `send` method that copies the value.
+	void sendCopy(const T& valueCopy) const SWIFT_NAME(send(_:)) { sav->send(valueCopy); }
 	template <class E>
 	void sendError(const E& exc) const {
 		sav->sendError(exc);
 	}
 
 	void send(Never) { sendError(never_reply()); }
-  // SWIFT: Convenience method, since there is also a Swift.Never, so Never() could be confusing
+	// SWIFT: Convenience method, since there is also a Swift.Never, so Never() could be confusing
 	void sendNever() const { send(Never()); }
 
 	Future<T> getFuture() const {
@@ -280,7 +278,7 @@ void setReplyPriority(const ReplyPromise<Reply>& p, TaskPriority taskID) {
 struct ReplyPromiseStreamReply {
 	Optional<UID> acknowledgeToken;
 	uint16_t sequence;
-	ReplyPromiseStreamReply() {}
+	ReplyPromiseStreamReply() = default;
 };
 
 struct AcknowledgementReply {
@@ -736,8 +734,9 @@ public:
 	void send(U&& value) const {
 		if (queue->isRemoteEndpoint()) {
 			FlowTransport::transport().sendUnreliable(SerializeSource<T>(std::forward<U>(value)), getEndpoint(), true);
-		} else
+		} else {
 			queue->send(std::forward<U>(value));
+		}
 	}
 
 	/*void sendError(const Error& error) const {
